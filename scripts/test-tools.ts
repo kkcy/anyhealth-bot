@@ -36,10 +36,14 @@ async function main() {
   console.log("\n--- Tool calls ---");
   for (const step of result.steps) {
     for (const tc of step.toolCalls) {
-      console.log(`  ${tc.toolName}(${JSON.stringify(tc.args)})`);
+      const args = tc.args ?? (tc as any).input;
+      console.log(`  ${tc.toolName}(${JSON.stringify(args) ?? "{}"})`);
     }
     for (const tr of step.toolResults) {
-      const text = typeof tr.result === "string" ? tr.result : JSON.stringify(tr.result);
+      const result = tr.result ?? (tr as any).output;
+      const text = result !== undefined 
+        ? (typeof result === "string" ? result : JSON.stringify(result))
+        : "undefined";
       console.log(`  → ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
     }
   }

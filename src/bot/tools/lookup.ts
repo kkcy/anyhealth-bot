@@ -79,35 +79,50 @@ export function createLookupTools(
         query: z.string().describe("Service name, description, or category to search for"),
       }),
       execute: async ({ query }) => {
-        const { data: services, error } = await supabase
+        // Search in Clinic services
+        const { data: cServices, error: cError } = await supabase
           .from("c_a_clinic_service")
           .select(`
             id, service_name, description, category, duration_minutes, price,
             method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8,
-            clinic:clinic_id(id, name, address, phone_number)
+            clinic_id
           `)
           .eq("is_active", true)
           .or(`service_name.ilike.%${query}%,description.ilike.%${query}%,category.ilike.%${query}%`)
           .limit(10);
 
-        if (error) {
-          return JSON.stringify({ error: "Failed to search services", detail: error.message });
+        // Search in TCM services
+        const { data: tcmServices, error: tcmError } = await supabase
+          .from("tcm_a_clinic_service")
+          .select(`
+            id, service_name, description, category, duration_minutes, price,
+            method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8,
+            clinic_id
+          `)
+          .eq("is_active", true)
+          .or(`service_name.ilike.%${query}%,description.ilike.%${query}%,category.ilike.%${query}%`)
+          .limit(10);
+
+        if (cError || tcmError) {
+          return JSON.stringify({ error: "Failed to search services", detail: cError?.message || tcmError?.message });
         }
 
-        if (!services || services.length === 0) {
+        const allServices = [...(cServices ?? []), ...(tcmServices ?? [])];
+
+        if (allServices.length === 0) {
           return JSON.stringify({ found: false, message: "No services found matching your description." });
         }
 
         // Collect all method IDs from results
         const methodIds = new Set<string>();
-        for (const svc of services) {
+        for (const svc of allServices) {
           for (let i = 1; i <= 8; i++) {
-            const mid = svc[`method_${i}` as keyof typeof svc] as string | null;
+            const mid = (svc as any)[`method_${i}`] as string | null;
             if (mid) methodIds.add(mid);
           }
         }
 
-        // Fetch method details
+        // Fetch method details (TCM and Clinic methods are in the same table c_a_service_method)
         let methodMap: Record<string, { id: string; method_name: string; priority: boolean; address: boolean }> = {};
         if (methodIds.size > 0) {
           const { data: methods } = await supabase
@@ -121,10 +136,10 @@ export function createLookupTools(
         }
 
         // Format results
-        const results = services.map((svc) => {
+        const results = allServices.map((svc) => {
           const methods = [];
           for (let i = 1; i <= 8; i++) {
-            const mid = svc[`method_${i}` as keyof typeof svc] as string | null;
+            const mid = (svc as any)[`method_${i}`] as string | null;
             if (mid && methodMap[mid]) {
               methods.push(methodMap[mid]);
             }
@@ -137,7 +152,7 @@ export function createLookupTools(
             category: svc.category,
             durationMinutes: svc.duration_minutes,
             price: svc.price,
-            clinic: svc.clinic,
+            clinicId: svc.clinic_id,
             methods: methods.map((m) => ({
               methodId: m.id,
               name: m.method_name,
