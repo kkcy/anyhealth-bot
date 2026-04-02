@@ -1,7 +1,7 @@
 import type { LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
 import { anthropic } from "@ai-sdk/anthropic";
-import { openai } from "@ai-sdk/openai";
+import { createOpenAI, openai } from "@ai-sdk/openai";
 
 export function getModel(): LanguageModel {
   const modelStr = process.env.AI_MODEL;
@@ -23,9 +23,16 @@ export function getModel(): LanguageModel {
       return anthropic(modelId);
     case "openai":
       return openai(modelId);
+    case "local": {
+      const localProvider = createOpenAI({
+        baseURL: process.env.AI_LOCAL_BASE_URL || "http://localhost:11434/v1",
+        apiKey: process.env.AI_LOCAL_API_KEY || "ollama",
+      });
+      return localProvider(modelId);
+    }
     default:
       throw new Error(
-        `Unknown AI provider "${provider}" in AI_MODEL="${modelStr}". Supported: google, anthropic, openai.`
+        `Unknown AI provider "${provider}" in AI_MODEL="${modelStr}". Supported: google, anthropic, openai, local.`
       );
   }
 }
