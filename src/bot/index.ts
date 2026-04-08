@@ -124,7 +124,12 @@ async function handleMessage(thread: any, message: any) {
     }
   }
 
-  const messages = allMessages.slice(sessionStart);
+  // Cap session messages to prevent token overflow
+  const MAX_SESSION_MESSAGES = 50;
+  const sessionMessages = allMessages.slice(sessionStart);
+  const messages = sessionMessages.length > MAX_SESSION_MESSAGES
+    ? sessionMessages.slice(-MAX_SESSION_MESSAGES)
+    : sessionMessages;
   const history = await toAiMessages(messages);
 
   console.log("[LLM] System Prompt:", systemPrompt);
