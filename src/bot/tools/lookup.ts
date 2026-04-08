@@ -78,7 +78,7 @@ export function createLookupTools(
         "Use this when user_lookup returned multiple patients and the user has indicated which one. " +
         "The patientId must be one of the IDs returned by user_lookup.",
       inputSchema: z.object({
-        patientId: z.string().uuid().describe("Patient ID from user_lookup results"),
+        patientId: z.string().describe("Exact patient UUID from user_lookup results"),
       }),
       execute: async ({ patientId }) => {
         const patient = state.patients?.find((p) => p.id === patientId);
@@ -236,7 +236,7 @@ export function createLookupTools(
         "Get doctors for a specific clinic. Returns doctor ID and name only. " +
         "Call this after the user selects a clinic from search_services results.",
       inputSchema: z.object({
-        clinicId: z.string().uuid().describe("Clinic ID from search_services results"),
+        clinicId: z.string().describe("Exact clinic UUID from search_services results (the clinicId field)"),
       }),
       execute: async ({ clinicId }) => {
         const { data: doctors, error } = await supabase
@@ -267,9 +267,9 @@ export function createLookupTools(
         "Check clinic opening hours for a given day. " +
         "Returns operating hours, lunch breaks, and already-booked time slots (NOT available slots — you must calculate free times from the gaps).",
       inputSchema: z.object({
-        clinicId: z.string().uuid().describe("The clinic ID"),
+        clinicId: z.string().describe("Exact clinic UUID from search_services results"),
         date: z.string().describe("Date to check in YYYY-MM-DD format"),
-        doctorId: z.string().uuid().optional().describe("Optional doctor ID to check their bookings"),
+        doctorId: z.string().optional().describe("Exact doctor UUID from get_clinic_doctors (optional)"),
       }),
       execute: async ({ clinicId, date, doctorId }) => {
         // Get clinic hours

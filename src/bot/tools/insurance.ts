@@ -142,7 +142,7 @@ export function createInsuranceTools(
         "Requires identity verification.",
       inputSchema: z.object({
         question: z.string().describe("The insurance question to answer"),
-        insuranceId: z.string().uuid().optional().describe("Specific policy ID. Uses most recent if not specified."),
+        insuranceId: z.string().optional().describe("Exact policy UUID from list_insurance results. Uses most recent if not specified."),
       }),
       execute: async ({ question, insuranceId }) => {
         // Code guard

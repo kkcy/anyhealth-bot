@@ -1,6 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
+import { validateUuids } from "./validate";
 import type { ThreadState } from "@/types";
 
 export function createBookingTools(
@@ -16,11 +17,11 @@ export function createBookingTools(
         "The 'time' field is required if the service method has requiresTime=true. " +
         "The 'address' field is required if the service method has requiresAddress=true.",
       inputSchema: z.object({
-        patientId: z.string().uuid().describe("Patient ID to book for"),
-        clinicId: z.string().uuid().describe("Clinic ID"),
-        serviceId: z.string().uuid().describe("Service ID from search_services"),
-        methodId: z.string().uuid().optional().describe("Service method ID (if service has methods)"),
-        doctorId: z.string().uuid().describe("Doctor ID"),
+        patientId: z.string().describe("Exact patient UUID from user_lookup results (e.g. 'a1b2c3d4-...')"),
+        clinicId: z.string().describe("Exact clinic UUID from search_services results (the clinicId field)"),
+        serviceId: z.string().describe("Exact service UUID from search_services results (the serviceId field)"),
+        methodId: z.string().optional().describe("Exact method UUID from search_services methods array (the methodId field)"),
+        doctorId: z.string().describe("Exact doctor UUID from get_clinic_doctors results (the doctorId field)"),
         date: z.string().describe("Appointment date in YYYY-MM-DD format"),
         time: z.string().optional().describe("Appointment time in HH:mm format (required if method.requiresTime)"),
         address: z.string().max(500).optional().describe("Location for house calls (required if method.requiresAddress)"),
@@ -28,6 +29,16 @@ export function createBookingTools(
         bookingType: z.enum(["checkup", "consultation", "vaccination"]).default("consultation"),
       }),
       execute: async ({ patientId, clinicId, serviceId, methodId, doctorId, date, time, address, details, bookingType }) => {
+        // Validate UUIDs — returns clear error if LLM passed placeholder strings
+        const uuidErr = validateUuids([
+          { value: patientId, name: "patientId", source: "user_lookup" },
+          { value: clinicId, name: "clinicId", source: "search_services" },
+          { value: serviceId, name: "serviceId", source: "search_services" },
+          { value: methodId, name: "methodId", source: "search_services methods array" },
+          { value: doctorId, name: "doctorId", source: "get_clinic_doctors" },
+        ]);
+        if (uuidErr) return uuidErr;
+
         if (!state.userId) {
           return JSON.stringify({ error: "Please start a conversation first. Call user_lookup." });
         }
@@ -127,7 +138,7 @@ export function createBookingTools(
         "View upcoming bookings for the user's patients. " +
         "Shows all bookings that are not cancelled or declined.",
       inputSchema: z.object({
-        patientId: z.string().uuid().optional().describe("Filter by specific patient ID"),
+        patientId: z.string().optional().describe("Exact patient UUID from user_lookup to filter by"),
       }),
       execute: async ({ patientId }) => {
         if (!state.userId) {
@@ -199,7 +210,7 @@ export function createBookingTools(
         "Reschedule an existing booking to a new date and/or time. " +
         "Sets status to 'reschedule_pending' for clinic confirmation.",
       inputSchema: z.object({
-        bookingId: z.string().uuid().describe("The booking ID to reschedule"),
+        bookingId: z.string().describe("Exact booking UUID from view_bookings results"),
         newDate: z.string().describe("New date in YYYY-MM-DD format"),
         newTime: z.string().optional().describe("New time in HH:mm format"),
       }),
@@ -256,7 +267,7 @@ export function createBookingTools(
     cancel_booking: tool({
       description: "Cancel an existing booking.",
       inputSchema: z.object({
-        bookingId: z.string().uuid().describe("The booking ID to cancel"),
+        bookingId: z.string().describe("Exact booking UUID from view_bookings results"),
       }),
       execute: async ({ bookingId }) => {
         if (!state.userId) {
