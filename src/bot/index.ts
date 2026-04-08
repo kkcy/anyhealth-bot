@@ -10,6 +10,25 @@ import type { ThreadState } from "@/types";
 
 let _bot: ReturnType<typeof createBot> | null = null;
 
+// In-memory deduplication cache to prevent processing the same WhatsApp message twice
+// (e.g., on Meta webhook retries). Entries expire after 5 minutes.
+const DEDUP_TTL_MS = 5 * 60 * 1000;
+const processedMessages = new Map<string, number>();
+
+function isDuplicate(messageId: string | undefined): boolean {
+  if (!messageId) return false;
+  const now = Date.now();
+  // Clean up expired entries periodically
+  if (processedMessages.size > 1000) {
+    for (const [id, ts] of processedMessages) {
+      if (now - ts > DEDUP_TTL_MS) processedMessages.delete(id);
+    }
+  }
+  if (processedMessages.has(messageId)) return true;
+  processedMessages.set(messageId, now);
+  return false;
+}
+
 function createBot() {
   validateEnv();
   const adapters = {
@@ -24,6 +43,10 @@ function createBot() {
   });
 
   bot.onNewMention(async (thread, message) => {
+    if (isDuplicate(message?.id)) {
+      console.log(`[BOT] Skipping duplicate message ${message.id}`);
+      return;
+    }
     await thread.subscribe();
 
     const phone = extractPhone(thread);
@@ -37,6 +60,10 @@ function createBot() {
   });
 
   bot.onSubscribedMessage(async (thread, message) => {
+    if (isDuplicate(message?.id)) {
+      console.log(`[BOT] Skipping duplicate message ${message.id}`);
+      return;
+    }
     await handleMessage(thread, message);
   });
 
