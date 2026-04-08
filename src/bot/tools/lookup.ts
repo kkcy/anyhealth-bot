@@ -72,6 +72,34 @@ export function createLookupTools(
       },
     }),
 
+    select_patient: tool({
+      description:
+        "Select which patient to act on behalf of. " +
+        "Use this when user_lookup returned multiple patients and the user has indicated which one. " +
+        "The patientId must be one of the IDs returned by user_lookup.",
+      inputSchema: z.object({
+        patientId: z.string().uuid().describe("Patient ID from user_lookup results"),
+      }),
+      execute: async ({ patientId }) => {
+        const patient = state.patients?.find((p) => p.id === patientId);
+        if (!patient) {
+          return JSON.stringify({
+            error: "Patient not found. Use an ID returned by user_lookup.",
+            availablePatients: state.patients?.map((p) => ({ id: p.id, name: p.name })) ?? [],
+          });
+        }
+
+        await updateState({ activePatientId: patientId });
+
+        return JSON.stringify({
+          success: true,
+          patientId: patient.id,
+          patientName: patient.name,
+          message: `Now acting on behalf of ${patient.name}.`,
+        });
+      },
+    }),
+
     search_services: tool({
       description:
         "Search for clinic services by name, description, or category. " +
