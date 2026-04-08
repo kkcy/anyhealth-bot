@@ -222,9 +222,8 @@ export function createLookupTools(
       execute: async ({ clinicId }) => {
         const { data: doctors, error } = await supabase
           .from("c_a_doctors")
-          .select("*")
-          .eq("clinic_id", clinicId)
-          .eq("is_active", true);
+          .select("id, name")
+          .eq("clinic_id", clinicId);
 
         if (error) {
           return JSON.stringify({ error: "Failed to load doctors", detail: error.message });
@@ -236,11 +235,9 @@ export function createLookupTools(
 
         return JSON.stringify({
           found: true,
-          doctors: doctors.map((d: Record<string, unknown>) => ({
+          doctors: doctors.map((d) => ({
             doctorId: d.id,
             name: d.name,
-            ...(d.specialty ? { specialty: d.specialty } : {}),
-            ...(d.qualification ? { qualification: d.qualification } : {}),
           })),
         });
       },
