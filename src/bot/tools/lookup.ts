@@ -103,7 +103,7 @@ export function createLookupTools(
     search_services: tool({
       description:
         "Search for clinic services by name, description, or category. " +
-        "Returns matching services with their clinic name and available methods. " +
+        "Returns matching services with clinic ID, service details, and available methods (may be empty). " +
         "Use short, simple keywords (e.g. 'heart' or 'checkup', not full sentences). " +
         "If no results, try a different keyword once — do not repeat the same query.",
       inputSchema: z.object({
@@ -214,7 +214,7 @@ export function createLookupTools(
 
     get_clinic_doctors: tool({
       description:
-        "Get available doctors for a specific clinic. " +
+        "Get doctors for a specific clinic. Returns doctor ID and name only. " +
         "Call this after the user selects a clinic from search_services results.",
       inputSchema: z.object({
         clinicId: z.string().uuid().describe("Clinic ID from search_services results"),
@@ -246,7 +246,7 @@ export function createLookupTools(
     get_clinic_availability: tool({
       description:
         "Check clinic opening hours for a given day. " +
-        "Returns the clinic's operating hours, lunch breaks, and any existing bookings for that date.",
+        "Returns operating hours, lunch breaks, and already-booked time slots (NOT available slots — you must calculate free times from the gaps).",
       inputSchema: z.object({
         clinicId: z.string().uuid().describe("The clinic ID"),
         date: z.string().describe("Date to check in YYYY-MM-DD format"),
