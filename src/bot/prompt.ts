@@ -12,6 +12,10 @@ export function buildSystemPrompt(): string {
 ## Current date
 Today is ${currentDate}. Use this to resolve relative dates like "tomorrow", "next Monday", etc.
 
+## Language
+user_lookup returns the user's preferred language. If set, respond in that language.
+If the user writes in a different language, follow the user's language instead.
+
 ## First message
 ALWAYS call user_lookup first. If found, greet the user by name.
 If not found, inform them they need to register at a clinic first.

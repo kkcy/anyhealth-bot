@@ -59,6 +59,7 @@ export function createLookupTools(
           userId: user.id,
           patients: patientRefs,
           activePatientId: patientRefs.length === 1 ? patientRefs[0].id : undefined,
+          language: user.language ?? undefined,
         });
 
         return JSON.stringify({

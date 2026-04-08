@@ -9,6 +9,7 @@ export interface ThreadState {
   userId?: string;
   patients?: PatientRef[];
   activePatientId?: string;
+  language?: string;
   verified: boolean;
   verifyAttempts: number;
   activeInsuranceId?: string;
