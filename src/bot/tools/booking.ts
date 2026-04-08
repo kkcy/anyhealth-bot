@@ -38,19 +38,23 @@ export function createBookingTools(
           return JSON.stringify({ error: "Patient not found. Please call user_lookup first." });
         }
 
-        // Get service duration (check both clinic and TCM tables)
+        // Get service duration and verify it belongs to the specified clinic
         let { data: service } = await supabase
           .from("c_a_clinic_service")
-          .select("duration_minutes")
+          .select("duration_minutes, clinic_id")
           .eq("id", serviceId)
           .maybeSingle();
 
         if (!service) {
           ({ data: service } = await supabase
             .from("tcm_a_clinic_service")
-            .select("duration_minutes")
+            .select("duration_minutes, clinic_id")
             .eq("id", serviceId)
             .maybeSingle());
+        }
+
+        if (service && service.clinic_id !== clinicId) {
+          return JSON.stringify({ error: "This service does not belong to the selected clinic. Please use the clinicId returned by search_services." });
         }
 
         // Validate conditional fields if method is specified
