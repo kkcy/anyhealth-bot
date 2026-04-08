@@ -189,6 +189,7 @@ export function createInsuranceTools(
         try {
           const result = await generateText({
             model: getModel(),
+            maxOutputTokens: 1024,
             system: `You are an insurance policy reader. Answer the user's question based ONLY on the policy text provided below. If the information is not mentioned in the policy, respond with: "This is not mentioned in your policy." Do not guess, infer, or provide information not explicitly stated in the policy text.
 
 INSURANCE POLICY TEXT:
