@@ -118,7 +118,7 @@ async function handleMessage(thread: any, message: any) {
   for (let i = allMessages.length - 1; i > 0; i--) {
     const currMs = new Date(allMessages[i].metadata?.dateSent ?? 0).getTime();
     const prevMs = new Date(allMessages[i - 1].metadata?.dateSent ?? 0).getTime();
-    if (currMs - prevMs > sessionGapMs) {
+    if (currMs - prevMs >= sessionGapMs) {
       sessionStart = i;
       break;
     }
