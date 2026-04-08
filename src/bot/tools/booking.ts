@@ -38,12 +38,36 @@ export function createBookingTools(
           return JSON.stringify({ error: "Patient not found. Please call user_lookup first." });
         }
 
-        // Get service duration
-        const { data: service } = await supabase
+        // Get service duration (check both clinic and TCM tables)
+        let { data: service } = await supabase
           .from("c_a_clinic_service")
           .select("duration_minutes")
           .eq("id", serviceId)
-          .single();
+          .maybeSingle();
+
+        if (!service) {
+          ({ data: service } = await supabase
+            .from("tcm_a_clinic_service")
+            .select("duration_minutes")
+            .eq("id", serviceId)
+            .maybeSingle());
+        }
+
+        // Validate conditional fields if method is specified
+        if (methodId) {
+          const { data: method } = await supabase
+            .from("c_a_service_method")
+            .select("priority, address")
+            .eq("id", methodId)
+            .maybeSingle();
+
+          if (method?.priority && !time) {
+            return JSON.stringify({ error: "This service method requires a time. Please provide a time in HH:mm format." });
+          }
+          if (method?.address && !address) {
+            return JSON.stringify({ error: "This service method requires an address (e.g., for house calls). Please provide a location." });
+          }
+        }
 
         const payload = {
           user_id: state.userId,
@@ -101,8 +125,8 @@ export function createBookingTools(
           .select(`
             id, original_date, original_time, new_date, new_time, status, details, address,
             booking_type, duration_minutes,
-            doctor:doctor_id(name, clinic_id),
-            service:service_id(service_name, category)
+            doctor:doctor_id(id, name, clinic_id),
+            service:service_id(id, service_name, category)
           `)
           .eq("user_id", state.userId)
           .not("status", "in", "(cancelled,declined)")

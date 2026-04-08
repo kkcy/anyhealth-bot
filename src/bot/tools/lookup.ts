@@ -65,7 +65,7 @@ export function createLookupTools(
           found: true,
           userName: user.user_name,
           language: user.language,
-          patients: patientRefs.map((p) => ({ name: p.name, ic: p.ic.slice(-4) })),
+          patients: patientRefs.map((p) => ({ id: p.id, name: p.name, ic: p.ic.slice(-4) })),
           patientCount: patientRefs.length,
         });
       },
@@ -74,11 +74,28 @@ export function createLookupTools(
     search_services: tool({
       description:
         "Search for clinic services by name, description, or category. " +
-        "Returns matching services with their clinic name and available methods.",
+        "Returns matching services with their clinic name and available methods. " +
+        "Use short, simple keywords (e.g. 'heart' or 'checkup', not full sentences). " +
+        "If no results, try a different keyword once — do not repeat the same query.",
       inputSchema: z.object({
         query: z.string().describe("Service name, description, or category to search for"),
       }),
       execute: async ({ query }) => {
+        // Split query into individual words for broader matching
+        const words = query
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((w) => w.length > 1);
+
+        // Build OR conditions for each word across name, description, category
+        const orConditions = words
+          .flatMap((word) => [
+            `service_name.ilike.%${word}%`,
+            `description.ilike.%${word}%`,
+            `category.ilike.%${word}%`,
+          ])
+          .join(",");
+
         // Search in Clinic services
         const { data: cServices, error: cError } = await supabase
           .from("c_a_clinic_service")
@@ -88,7 +105,7 @@ export function createLookupTools(
             clinic_id
           `)
           .eq("is_active", true)
-          .or(`service_name.ilike.%${query}%,description.ilike.%${query}%,category.ilike.%${query}%`)
+          .or(orConditions)
           .limit(10);
 
         // Search in TCM services
@@ -100,7 +117,7 @@ export function createLookupTools(
             clinic_id
           `)
           .eq("is_active", true)
-          .or(`service_name.ilike.%${query}%,description.ilike.%${query}%,category.ilike.%${query}%`)
+          .or(orConditions)
           .limit(10);
 
         if (cError || tcmError) {
@@ -163,6 +180,40 @@ export function createLookupTools(
         });
 
         return JSON.stringify({ found: true, services: results });
+      },
+    }),
+
+    get_clinic_doctors: tool({
+      description:
+        "Get available doctors for a specific clinic. " +
+        "Call this after the user selects a clinic from search_services results.",
+      inputSchema: z.object({
+        clinicId: z.string().uuid().describe("Clinic ID from search_services results"),
+      }),
+      execute: async ({ clinicId }) => {
+        const { data: doctors, error } = await supabase
+          .from("c_a_doctors")
+          .select("id, name, specialty, qualification")
+          .eq("clinic_id", clinicId)
+          .eq("is_active", true);
+
+        if (error) {
+          return JSON.stringify({ error: "Failed to load doctors", detail: error.message });
+        }
+
+        if (!doctors || doctors.length === 0) {
+          return JSON.stringify({ found: false, message: "No doctors found for this clinic." });
+        }
+
+        return JSON.stringify({
+          found: true,
+          doctors: doctors.map((d) => ({
+            doctorId: d.id,
+            name: d.name,
+            specialty: d.specialty,
+            qualification: d.qualification,
+          })),
+        });
       },
     }),
 

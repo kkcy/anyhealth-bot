@@ -18,6 +18,7 @@ function createBot() {
     userName: "anyhealth-bot",
     adapters,
     state: createPostgresState(),
+    concurrency: "queue",
   });
 
   bot.onNewMention(async (thread, message) => {
@@ -52,7 +53,9 @@ function extractPhone(thread: { id: string }): string {
   return parts[2] ?? "";
 }
 
-async function handleMessage(thread: any, _message: any) {
+async function handleMessage(thread: any, message: any) {
+  console.log(`[BOT] Incoming message from ${thread.id}:`, JSON.stringify(message, null, 2));
+
   await thread.startTyping?.();
 
   const state: ThreadState = (await thread.state) ?? {
@@ -73,23 +76,57 @@ async function handleMessage(thread: any, _message: any) {
   const tools = createTools(state, updateState);
   const systemPrompt = buildSystemPrompt();
 
-  const messages = [];
+  const sessionGapMs =
+    Number(process.env.SESSION_GAP_HOURS || "2") * 60 * 60 * 1000;
+
+  // Collect all messages, then find the session boundary (last gap > threshold)
+  const allMessages = [];
   for await (const msg of thread.allMessages) {
-    messages.push(msg);
+    allMessages.push(msg);
   }
+
+  let sessionStart = 0;
+  for (let i = allMessages.length - 1; i > 0; i--) {
+    const currMs = new Date(allMessages[i].metadata?.dateSent ?? 0).getTime();
+    const prevMs = new Date(allMessages[i - 1].metadata?.dateSent ?? 0).getTime();
+    if (currMs - prevMs > sessionGapMs) {
+      sessionStart = i;
+      break;
+    }
+  }
+
+  const messages = allMessages.slice(sessionStart);
   const history = await toAiMessages(messages);
+
+  console.log("[LLM] System Prompt:", systemPrompt);
+  console.log("[LLM] History:", JSON.stringify(history, null, 2));
 
   try {
     const result = await generateText({
       model: getModel(),
       system: systemPrompt,
       tools,
-      stopWhen: stepCountIs(8),
+      onStepFinish({ text, toolCalls, toolResults, finishReason }) {
+        console.log("[LLM STEP] Finish Reason:", finishReason);
+        if (text) console.log("[LLM STEP] Response:", text);
+        if (toolCalls?.length)
+          console.log("[LLM STEP] Tool Calls:", JSON.stringify(toolCalls, null, 2));
+        if (toolResults?.length)
+          console.log(
+            "[LLM STEP] Tool Results:",
+            JSON.stringify(toolResults, null, 2)
+          );
+      },
+      stopWhen: stepCountIs(16),
       messages: history,
     });
 
     if (result.text) {
       await thread.post(result.text);
+    } else {
+      await thread.post(
+        "I'm sorry, I couldn't find what you're looking for. Could you describe the service you need in a different way, or contact the clinic directly for help?"
+      );
     }
   } catch (err) {
     console.error("handleMessage error:", err);
