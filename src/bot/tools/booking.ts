@@ -38,17 +38,17 @@ export function createBookingTools(
           return JSON.stringify({ error: "Patient not found. Please call user_lookup first." });
         }
 
-        // Get service duration and verify it belongs to the specified clinic
+        // Get service duration/name and verify it belongs to the specified clinic
         let { data: service } = await supabase
           .from("c_a_clinic_service")
-          .select("duration_minutes, clinic_id")
+          .select("service_name, duration_minutes, clinic_id")
           .eq("id", serviceId)
           .maybeSingle();
 
         if (!service) {
           ({ data: service } = await supabase
             .from("tcm_a_clinic_service")
-            .select("duration_minutes, clinic_id")
+            .select("service_name, duration_minutes, clinic_id")
             .eq("id", serviceId)
             .maybeSingle());
         }
@@ -100,6 +100,12 @@ export function createBookingTools(
 
         await updateState({ activePatientId: patientId });
 
+        // Fetch doctor and clinic names for confirmation
+        const [{ data: doctor }, { data: clinic }] = await Promise.all([
+          supabase.from("c_a_doctors").select("name").eq("id", doctorId).maybeSingle(),
+          supabase.from("c_a_clinics").select("name, address").eq("id", clinicId).maybeSingle(),
+        ]);
+
         return JSON.stringify({
           success: true,
           bookingId: booking.id,
@@ -107,6 +113,10 @@ export function createBookingTools(
           time: booking.original_time,
           status: booking.status,
           patientName: patient.name,
+          serviceName: service?.service_name ?? null,
+          doctorName: doctor?.name ?? null,
+          clinicName: clinic?.name ?? null,
+          clinicAddress: clinic?.address ?? null,
           message: "Booking created successfully. The clinic will confirm your appointment.",
         });
       },
