@@ -159,17 +159,36 @@ export function createBookingTools(
           return JSON.stringify({ found: false, message: "No upcoming bookings found." });
         }
 
-        const results = bookings.map((b) => ({
-          bookingId: b.id,
-          date: b.new_date ?? b.original_date,
-          time: b.new_time ?? b.original_time,
-          status: b.status,
-          type: b.booking_type,
-          service: b.service,
-          doctor: b.doctor,
-          details: b.details,
-          address: b.address,
-        }));
+        // Fetch clinic names for all bookings
+        const clinicIds = [...new Set(
+          bookings.map((b) => (b.doctor as any)?.clinic_id).filter(Boolean)
+        )];
+        let clinicMap: Record<string, string> = {};
+        if (clinicIds.length > 0) {
+          const { data: clinics } = await supabase
+            .from("c_a_clinics")
+            .select("id, name")
+            .in("id", clinicIds);
+          if (clinics) {
+            clinicMap = Object.fromEntries(clinics.map((c) => [c.id, c.name]));
+          }
+        }
+
+        const results = bookings.map((b) => {
+          const doctor = b.doctor as any;
+          return {
+            bookingId: b.id,
+            date: b.new_date ?? b.original_date,
+            time: b.new_time ?? b.original_time,
+            status: b.status,
+            type: b.booking_type,
+            service: b.service,
+            doctorName: doctor?.name ?? null,
+            clinicName: doctor?.clinic_id ? clinicMap[doctor.clinic_id] ?? null : null,
+            details: b.details,
+            address: b.address,
+          };
+        });
 
         return JSON.stringify({ found: true, bookings: results });
       },
