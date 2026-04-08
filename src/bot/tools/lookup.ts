@@ -103,7 +103,8 @@ export function createLookupTools(
     search_services: tool({
       description:
         "Search for clinic services by name, description, or category. " +
-        "Returns matching services with clinic ID, service details, and available methods (may be empty). " +
+        "Returns matching services with clinic name, address, and available methods (may be empty). " +
+        "If doctorSelection is false, the clinic assigns doctors — skip get_clinic_doctors. " +
         "Use short, simple keywords (e.g. 'heart' or 'checkup', not full sentences). " +
         "If no results, try a different keyword once — do not repeat the same query.",
       inputSchema: z.object({
@@ -159,6 +160,20 @@ export function createLookupTools(
           return JSON.stringify({ found: false, message: "No services found matching your description." });
         }
 
+        // Fetch clinic details for all results
+        const clinicIds = [...new Set(allServices.map((s) => s.clinic_id))];
+        let clinicMap: Record<string, { name: string; address: string; doctor_selection: boolean | null }> = {};
+        if (clinicIds.length > 0) {
+          const { data: clinics } = await supabase
+            .from("c_a_clinics")
+            .select("id, name, address, doctor_selection")
+            .in("id", clinicIds);
+
+          if (clinics) {
+            clinicMap = Object.fromEntries(clinics.map((c) => [c.id, c]));
+          }
+        }
+
         // Collect all method IDs from results
         const methodIds = new Set<string>();
         for (const svc of allServices) {
@@ -191,6 +206,7 @@ export function createLookupTools(
             }
           }
 
+          const clinic = clinicMap[svc.clinic_id];
           return {
             serviceId: svc.id,
             name: svc.service_name,
@@ -199,6 +215,9 @@ export function createLookupTools(
             durationMinutes: svc.duration_minutes,
             price: svc.price,
             clinicId: svc.clinic_id,
+            clinicName: clinic?.name ?? null,
+            clinicAddress: clinic?.address ?? null,
+            doctorSelection: clinic?.doctor_selection ?? true,
             methods: methods.map((m) => ({
               methodId: m.id,
               name: m.method_name,
