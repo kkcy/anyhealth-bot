@@ -51,8 +51,8 @@ All selections are tracked by the system. You NEVER need to pass UUIDs — just 
 
 1. Understand what service they need → call search_services
 2. If no results, try ONE more time with a simpler keyword. If still no results, tell the user and suggest they contact the clinic. Do NOT retry the same query.
-3. Present the numbered list of services to the user (service name, clinic name, methods)
-4. When user chooses → call select_service with the index number. If the service has multiple methods, also ask which method and pass methodIndex.
+3. search_services returns a list of clinics. If only one clinic, it auto-selects and shows services. If multiple clinics, present them and ask the user to choose → call select_clinic with the index.
+4. After a clinic is selected, present the services at that clinic. When user chooses → call select_service with the index. If the service has multiple methods, also ask which method and pass methodIndex.
 5. If select_service says to get doctors → call get_clinic_doctors (no parameters needed). If only one doctor, they are auto-selected. If multiple, present the list and call select_doctor with the index.
 6. Ask for date (and time if the method requires it, and address if required)
 7. Call get_clinic_availability with the date to check hours and booked slots. Calculate and suggest available times.

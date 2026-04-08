@@ -4,13 +4,20 @@ export interface PatientRef {
   ic: string;
 }
 
-export interface ServiceOption {
-  serviceId: string;
-  serviceName: string;
+export interface ClinicOption {
   clinicId: string;
   clinicName: string;
   clinicAddress: string;
   doctorSelection: boolean;
+  matchingServiceCount: number;
+}
+
+export interface ServiceOption {
+  serviceId: string;
+  serviceName: string;
+  description: string;
+  durationMinutes: number;
+  price: number | null;
   methods: MethodOption[];
 }
 
@@ -36,11 +43,13 @@ export interface ThreadState {
   verifyAttempts: number;
   activeInsuranceId?: string;
 
-  // Booking selections (set by select_service, select_doctor)
+  // Booking selections (set by search → select_clinic → select_service → select_doctor)
+  lastSearchQuery?: string;
+  clinicOptions?: ClinicOption[];
   serviceOptions?: ServiceOption[];
   doctorOptions?: DoctorOption[];
-  activeServiceId?: string;
   activeClinicId?: string;
+  activeServiceId?: string;
   activeMethodId?: string;
   activeDoctorId?: string;
 }

@@ -1,13 +1,110 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
-import type { ThreadState, ServiceOption, MethodOption, DoctorOption } from "@/types";
+import type { ThreadState, ClinicOption, ServiceOption, MethodOption, DoctorOption } from "@/types";
 
 export function createLookupTools(
   state: ThreadState,
   updateState: (partial: Partial<ThreadState>) => Promise<void>
 ) {
   const supabase = getSupabase();
+
+  // Shared helper: fetch and return services at a specific clinic matching a query
+  async function fetchClinicServices(clinic: ClinicOption, query: string, words: string[]) {
+    const orConditions = words
+      .flatMap((word) => [
+        `service_name.ilike.%${word}%`,
+        `description.ilike.%${word}%`,
+        `category.ilike.%${word}%`,
+      ])
+      .join(",");
+
+    const { data: cServices } = await supabase
+      .from("c_a_clinic_service")
+      .select(`
+        id, service_name, description, duration_minutes, price,
+        method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8
+      `)
+      .eq("clinic_id", clinic.clinicId)
+      .eq("is_active", true)
+      .or(orConditions)
+      .limit(10);
+
+    const { data: tcmServices } = await supabase
+      .from("tcm_a_clinic_service")
+      .select(`
+        id, service_name, description, duration_minutes, price,
+        method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8
+      `)
+      .eq("clinic_id", clinic.clinicId)
+      .eq("is_active", true)
+      .or(orConditions)
+      .limit(10);
+
+    const allServices = [...(cServices ?? []), ...(tcmServices ?? [])];
+
+    // Fetch method details
+    const methodIds = new Set<string>();
+    for (const svc of allServices) {
+      for (let i = 1; i <= 8; i++) {
+        const mid = (svc as any)[`method_${i}`] as string | null;
+        if (mid) methodIds.add(mid);
+      }
+    }
+
+    let methodMap: Record<string, { id: string; method_name: string; priority: boolean; address: boolean }> = {};
+    if (methodIds.size > 0) {
+      const { data: methods } = await supabase
+        .from("c_a_service_method")
+        .select("id, method_name, priority, address")
+        .in("id", Array.from(methodIds));
+      if (methods) {
+        methodMap = Object.fromEntries(methods.map((m) => [m.id, m]));
+      }
+    }
+
+    const serviceOptions: ServiceOption[] = allServices.map((svc) => {
+      const svcMethods: MethodOption[] = [];
+      for (let i = 1; i <= 8; i++) {
+        const mid = (svc as any)[`method_${i}`] as string | null;
+        if (mid && methodMap[mid]) {
+          const m = methodMap[mid];
+          svcMethods.push({
+            methodId: m.id,
+            methodName: m.method_name,
+            requiresTime: m.priority,
+            requiresAddress: m.address,
+          });
+        }
+      }
+
+      return {
+        serviceId: svc.id,
+        serviceName: svc.service_name,
+        description: svc.description ?? "",
+        durationMinutes: svc.duration_minutes,
+        price: svc.price,
+        methods: svcMethods,
+      };
+    });
+
+    await updateState({ serviceOptions });
+
+    return JSON.stringify({
+      clinic: clinic.clinicName,
+      address: clinic.clinicAddress,
+      services: serviceOptions.map((s, i) => ({
+        index: i + 1,
+        name: s.serviceName,
+        duration: `${s.durationMinutes} min`,
+        price: s.price ? `RM ${s.price}` : null,
+        methods: s.methods.length > 0
+          ? s.methods.map((m) => m.methodName)
+          : ["In-clinic visit"],
+      })),
+      instruction: "Present these services to the user. When they choose, call select_service with the index number.",
+    });
+  }
 
   return {
     user_lookup: tool({
@@ -99,8 +196,8 @@ export function createLookupTools(
 
     search_services: tool({
       description:
-        "Search for clinic services by keyword. Returns a numbered list. " +
-        "After presenting results to the user, call select_service with their choice. " +
+        "Search for clinics that offer matching services. Returns a numbered list of clinics. " +
+        "After presenting clinics to the user, call select_clinic with their choice. " +
         "Use short keywords (e.g. 'heart' or 'checkup', not full sentences). " +
         "If no results, try a different keyword once — do not repeat the same query.",
       inputSchema: z.object({
@@ -122,22 +219,14 @@ export function createLookupTools(
 
         const { data: cServices, error: cError } = await supabase
           .from("c_a_clinic_service")
-          .select(`
-            id, service_name, description, category, duration_minutes, price,
-            method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8,
-            clinic_id
-          `)
+          .select("clinic_id")
           .eq("is_active", true)
           .or(orConditions)
           .limit(30);
 
         const { data: tcmServices, error: tcmError } = await supabase
           .from("tcm_a_clinic_service")
-          .select(`
-            id, service_name, description, category, duration_minutes, price,
-            method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8,
-            clinic_id
-          `)
+          .select("clinic_id")
           .eq("is_active", true)
           .or(orConditions)
           .limit(30);
@@ -146,107 +235,88 @@ export function createLookupTools(
           return JSON.stringify({ error: "Failed to search services", detail: cError?.message || tcmError?.message });
         }
 
-        // Require ALL words to match somewhere in the service (name, description, or category)
-        const rawServices = [...(cServices ?? []), ...(tcmServices ?? [])];
-        const allServices = rawServices.filter((svc) => {
-          const text = `${svc.service_name} ${svc.description ?? ""} ${svc.category ?? ""}`.toLowerCase();
-          return words.every((w) => text.includes(w));
-        }).slice(0, 10);
-
-        if (allServices.length === 0) {
+        const allMatches = [...(cServices ?? []), ...(tcmServices ?? [])];
+        if (allMatches.length === 0) {
           return JSON.stringify({ found: false, message: "No services found matching your description." });
         }
 
-        // Fetch clinic details
-        const clinicIds = [...new Set(allServices.map((s) => s.clinic_id))];
-        let clinicMap: Record<string, { name: string; address: string; doctor_selection: boolean | null }> = {};
-        if (clinicIds.length > 0) {
-          const { data: clinics } = await supabase
-            .from("c_a_clinics")
-            .select("id, name, address, doctor_selection")
-            .in("id", clinicIds);
-          if (clinics) {
-            clinicMap = Object.fromEntries(clinics.map((c) => [c.id, c]));
-          }
+        // Count matches per clinic
+        const clinicCounts: Record<string, number> = {};
+        for (const m of allMatches) {
+          clinicCounts[m.clinic_id] = (clinicCounts[m.clinic_id] ?? 0) + 1;
         }
 
-        // Fetch method details
-        const methodIds = new Set<string>();
-        for (const svc of allServices) {
-          for (let i = 1; i <= 8; i++) {
-            const mid = (svc as any)[`method_${i}`] as string | null;
-            if (mid) methodIds.add(mid);
-          }
+        const clinicIds = Object.keys(clinicCounts);
+        const { data: clinics } = await supabase
+          .from("c_a_clinics")
+          .select("id, name, address, doctor_selection")
+          .in("id", clinicIds);
+
+        if (!clinics || clinics.length === 0) {
+          return JSON.stringify({ found: false, message: "No clinics found." });
         }
 
-        let methodMap: Record<string, { id: string; method_name: string; priority: boolean; address: boolean }> = {};
-        if (methodIds.size > 0) {
-          const { data: methods } = await supabase
-            .from("c_a_service_method")
-            .select("id, method_name, priority, address")
-            .in("id", Array.from(methodIds));
-          if (methods) {
-            methodMap = Object.fromEntries(methods.map((m) => [m.id, m]));
-          }
-        }
-
-        // Build options and save to state
-        const serviceOptions: ServiceOption[] = allServices.map((svc) => {
-          const svcMethods: MethodOption[] = [];
-          for (let i = 1; i <= 8; i++) {
-            const mid = (svc as any)[`method_${i}`] as string | null;
-            if (mid && methodMap[mid]) {
-              const m = methodMap[mid];
-              svcMethods.push({
-                methodId: m.id,
-                methodName: m.method_name,
-                requiresTime: m.priority,
-                requiresAddress: m.address,
-              });
-            }
-          }
-
-          const clinic = clinicMap[svc.clinic_id];
-          return {
-            serviceId: svc.id,
-            serviceName: svc.service_name,
-            clinicId: svc.clinic_id,
-            clinicName: clinic?.name ?? "Unknown clinic",
-            clinicAddress: clinic?.address ?? "",
-            doctorSelection: clinic?.doctor_selection ?? true,
-            methods: svcMethods,
-          };
-        });
-
-        await updateState({ serviceOptions });
-
-        // Return numbered list for the LLM to present
-        const display = serviceOptions.map((opt, i) => ({
-          index: i + 1,
-          service: opt.serviceName,
-          clinic: opt.clinicName,
-          address: opt.clinicAddress,
-          methods: opt.methods.length > 0
-            ? opt.methods.map((m) => m.methodName)
-            : ["In-clinic visit"],
+        const clinicOptions: ClinicOption[] = clinics.map((c) => ({
+          clinicId: c.id,
+          clinicName: c.name,
+          clinicAddress: c.address,
+          doctorSelection: c.doctor_selection ?? true,
+          matchingServiceCount: clinicCounts[c.id] ?? 0,
         }));
+
+        await updateState({ clinicOptions, lastSearchQuery: query });
+
+        // Auto-select if only one clinic
+        if (clinicOptions.length === 1) {
+          await updateState({ activeClinicId: clinicOptions[0].clinicId });
+          // Immediately fetch services for this clinic
+          return await fetchClinicServices(clinicOptions[0], query, words);
+        }
 
         return JSON.stringify({
           found: true,
-          count: display.length,
-          services: display,
-          instruction: "Present these options to the user. When they choose, call select_service with the index number.",
+          clinics: clinicOptions.map((c, i) => ({
+            index: i + 1,
+            name: c.clinicName,
+            address: c.clinicAddress,
+            matchingServices: c.matchingServiceCount,
+          })),
+          instruction: "Present these clinics to the user. When they choose, call select_clinic with the index number.",
         });
+      },
+    }),
+
+    select_clinic: tool({
+      description:
+        "Select a clinic from search_services results. Shows the matching services at that clinic.",
+      inputSchema: z.object({
+        index: z.number().describe("Clinic number from search_services list (1, 2, 3, ...)"),
+      }),
+      execute: async ({ index }) => {
+        const options = state.clinicOptions ?? [];
+        if (index < 1 || index > options.length) {
+          return JSON.stringify({
+            error: `Invalid selection. Choose a number between 1 and ${options.length}.`,
+          });
+        }
+
+        const clinic = options[index - 1];
+        await updateState({ activeClinicId: clinic.clinicId });
+
+        const query = state.lastSearchQuery ?? "";
+        const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 1);
+
+        return await fetchClinicServices(clinic, query, words);
       },
     }),
 
     select_service: tool({
       description:
-        "Select a service from search_services results by index number. " +
+        "Select a service from select_clinic results by index number. " +
         "If the service has multiple methods, also pass the method index. " +
         "If only one method, it is auto-selected.",
       inputSchema: z.object({
-        index: z.number().describe("Service number from search_services list (1, 2, 3, ...)"),
+        index: z.number().describe("Service number from the service list (1, 2, 3, ...)"),
         methodIndex: z.number().optional().describe("Method number if the service has multiple methods (1, 2, ...)"),
       }),
       execute: async ({ index, methodIndex }) => {
@@ -264,7 +334,6 @@ export function createLookupTools(
         if (service.methods.length === 0) {
           // No selectable methods
         } else if (service.methods.length === 1) {
-          // Auto-select the only method
           selectedMethod = service.methods[0];
           selectedMethodId = selectedMethod.methodId;
         } else if (methodIndex !== undefined) {
@@ -277,11 +346,9 @@ export function createLookupTools(
           selectedMethod = service.methods[methodIndex - 1];
           selectedMethodId = selectedMethod.methodId;
         } else {
-          // Multiple methods, none selected — ask user to choose
           return JSON.stringify({
             needsMethodSelection: true,
             service: service.serviceName,
-            clinic: service.clinicName,
             methods: service.methods.map((m, i) => ({
               index: i + 1,
               name: m.methodName,
@@ -294,22 +361,19 @@ export function createLookupTools(
 
         await updateState({
           activeServiceId: service.serviceId,
-          activeClinicId: service.clinicId,
           activeMethodId: selectedMethodId,
         });
 
-        // Determine next step
-        const needsDoctors = service.doctorSelection;
+        // Find clinic info from clinicOptions
+        const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
 
         return JSON.stringify({
           success: true,
           service: service.serviceName,
-          clinic: service.clinicName,
-          clinicAddress: service.clinicAddress,
           method: selectedMethod?.methodName ?? "In-clinic visit",
           requiresTime: selectedMethod?.requiresTime ?? false,
           requiresAddress: selectedMethod?.requiresAddress ?? false,
-          nextStep: needsDoctors
+          nextStep: clinicOpt?.doctorSelection
             ? "Call get_clinic_doctors to let the user pick a doctor."
             : "Clinic assigns doctors. Proceed to ask for date/time.",
         });
