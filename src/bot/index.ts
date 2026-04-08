@@ -5,11 +5,13 @@ import { generateText, stepCountIs } from "ai";
 import { createTools } from "./tools";
 import { buildSystemPrompt } from "./prompt";
 import { getModel } from "@/lib/config";
+import { validateEnv } from "@/lib/env";
 import type { ThreadState } from "@/types";
 
 let _bot: ReturnType<typeof createBot> | null = null;
 
 function createBot() {
+  validateEnv();
   const adapters = {
     whatsapp: createWhatsAppAdapter(),
   };
