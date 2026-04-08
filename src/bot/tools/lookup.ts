@@ -112,12 +112,11 @@ export function createLookupTools(
           .split(/\s+/)
           .filter((w) => w.length > 1);
 
-        // Match against service name and description only — category is too broad
-        // (e.g., "Checkup & Test" matches everything from Skin Disease to Knee Osteoarthritis)
         const orConditions = words
           .flatMap((word) => [
             `service_name.ilike.%${word}%`,
             `description.ilike.%${word}%`,
+            `category.ilike.%${word}%`,
           ])
           .join(",");
 
@@ -147,10 +146,10 @@ export function createLookupTools(
           return JSON.stringify({ error: "Failed to search services", detail: cError?.message || tcmError?.message });
         }
 
-        // Require ALL words to match somewhere in the service name or description
+        // Require ALL words to match somewhere in the service (name, description, or category)
         const rawServices = [...(cServices ?? []), ...(tcmServices ?? [])];
         const allServices = rawServices.filter((svc) => {
-          const text = `${svc.service_name} ${svc.description ?? ""}`.toLowerCase();
+          const text = `${svc.service_name} ${svc.description ?? ""} ${svc.category ?? ""}`.toLowerCase();
           return words.every((w) => text.includes(w));
         }).slice(0, 10);
 
