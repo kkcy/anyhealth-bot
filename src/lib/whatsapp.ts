@@ -31,7 +31,7 @@ export async function sendReplyButtons(
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
-  await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+  const res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -53,6 +53,11 @@ export async function sendReplyButtons(
       },
     }),
   });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    console.error(`[WHATSAPP] sendReplyButtons failed (${res.status}):`, detail);
+  }
 }
 
 export async function sendListMessage(
@@ -64,7 +69,7 @@ export async function sendListMessage(
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
-  await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+  const res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -91,4 +96,9 @@ export async function sendListMessage(
       },
     }),
   });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    console.error(`[WHATSAPP] sendListMessage failed (${res.status}):`, detail);
+  }
 }
