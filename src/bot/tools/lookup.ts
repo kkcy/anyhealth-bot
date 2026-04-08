@@ -1,7 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
-import type { ThreadState } from "@/types";
+import type { ThreadState, ServiceOption, MethodOption, DoctorOption } from "@/types";
 
 export function createLookupTools(
   state: ThreadState,
@@ -20,7 +20,6 @@ export function createLookupTools(
           return "Could not determine sender identity. WhatsApp is required.";
         }
 
-        // Find whatsapp_users by phone
         const { data: user, error: userError } = await supabase
           .from("whatsapp_users")
           .select("id, user_name, whatsapp_number, language")
@@ -39,7 +38,6 @@ export function createLookupTools(
           });
         }
 
-        // Find all patients linked to this user
         const { data: patients, error: patientError } = await supabase
           .from("patient_id")
           .select("id, patient_name, ic_passport")
@@ -66,7 +64,7 @@ export function createLookupTools(
           found: true,
           userName: user.user_name,
           language: user.language,
-          patients: patientRefs.map((p) => ({ id: p.id, name: p.name, ic: p.ic.slice(-4) })),
+          patients: patientRefs.map((p, i) => ({ index: i + 1, name: p.name, ic: p.ic.slice(-4) })),
           patientCount: patientRefs.length,
         });
       },
@@ -75,25 +73,24 @@ export function createLookupTools(
     select_patient: tool({
       description:
         "Select which patient to act on behalf of. " +
-        "Use this when user_lookup returned multiple patients and the user has indicated which one. " +
-        "The patientId must be one of the IDs returned by user_lookup.",
+        "Use when user_lookup returned multiple patients and the user indicated which one.",
       inputSchema: z.object({
-        patientId: z.string().describe("Exact patient UUID from user_lookup results"),
+        index: z.number().describe("Patient number from user_lookup list (1, 2, 3, ...)"),
       }),
-      execute: async ({ patientId }) => {
-        const patient = state.patients?.find((p) => p.id === patientId);
-        if (!patient) {
+      execute: async ({ index }) => {
+        const patients = state.patients ?? [];
+        if (index < 1 || index > patients.length) {
           return JSON.stringify({
-            error: "Patient not found. Use an ID returned by user_lookup.",
-            availablePatients: state.patients?.map((p) => ({ id: p.id, name: p.name })) ?? [],
+            error: `Invalid selection. Choose a number between 1 and ${patients.length}.`,
+            patients: patients.map((p, i) => ({ index: i + 1, name: p.name })),
           });
         }
 
-        await updateState({ activePatientId: patientId });
+        const patient = patients[index - 1];
+        await updateState({ activePatientId: patient.id });
 
         return JSON.stringify({
           success: true,
-          patientId: patient.id,
           patientName: patient.name,
           message: `Now acting on behalf of ${patient.name}.`,
         });
@@ -102,22 +99,19 @@ export function createLookupTools(
 
     search_services: tool({
       description:
-        "Search for clinic services by name, description, or category. " +
-        "Returns matching services with clinic name, address, and available methods (may be empty). " +
-        "If doctorSelection is false, the clinic assigns doctors — skip get_clinic_doctors. " +
-        "Use short, simple keywords (e.g. 'heart' or 'checkup', not full sentences). " +
+        "Search for clinic services by keyword. Returns a numbered list. " +
+        "After presenting results to the user, call select_service with their choice. " +
+        "Use short keywords (e.g. 'heart' or 'checkup', not full sentences). " +
         "If no results, try a different keyword once — do not repeat the same query.",
       inputSchema: z.object({
         query: z.string().describe("Service name, description, or category to search for"),
       }),
       execute: async ({ query }) => {
-        // Split query into individual words for broader matching
         const words = query
           .toLowerCase()
           .split(/\s+/)
           .filter((w) => w.length > 1);
 
-        // Build OR conditions for each word across name, description, category
         const orConditions = words
           .flatMap((word) => [
             `service_name.ilike.%${word}%`,
@@ -126,7 +120,6 @@ export function createLookupTools(
           ])
           .join(",");
 
-        // Search in Clinic services
         const { data: cServices, error: cError } = await supabase
           .from("c_a_clinic_service")
           .select(`
@@ -138,7 +131,6 @@ export function createLookupTools(
           .or(orConditions)
           .limit(10);
 
-        // Search in TCM services
         const { data: tcmServices, error: tcmError } = await supabase
           .from("tcm_a_clinic_service")
           .select(`
@@ -160,7 +152,7 @@ export function createLookupTools(
           return JSON.stringify({ found: false, message: "No services found matching your description." });
         }
 
-        // Fetch clinic details for all results
+        // Fetch clinic details
         const clinicIds = [...new Set(allServices.map((s) => s.clinic_id))];
         let clinicMap: Record<string, { name: string; address: string; doctor_selection: boolean | null }> = {};
         if (clinicIds.length > 0) {
@@ -168,13 +160,12 @@ export function createLookupTools(
             .from("c_a_clinics")
             .select("id, name, address, doctor_selection")
             .in("id", clinicIds);
-
           if (clinics) {
             clinicMap = Object.fromEntries(clinics.map((c) => [c.id, c]));
           }
         }
 
-        // Collect all method IDs from results
+        // Fetch method details
         const methodIds = new Set<string>();
         for (const svc of allServices) {
           for (let i = 1; i <= 8; i++) {
@@ -183,66 +174,158 @@ export function createLookupTools(
           }
         }
 
-        // Fetch method details (TCM and Clinic methods are in the same table c_a_service_method)
         let methodMap: Record<string, { id: string; method_name: string; priority: boolean; address: boolean }> = {};
         if (methodIds.size > 0) {
           const { data: methods } = await supabase
             .from("c_a_service_method")
             .select("id, method_name, priority, address")
             .in("id", Array.from(methodIds));
-
           if (methods) {
             methodMap = Object.fromEntries(methods.map((m) => [m.id, m]));
           }
         }
 
-        // Format results
-        const results = allServices.map((svc) => {
-          const methods = [];
+        // Build options and save to state
+        const serviceOptions: ServiceOption[] = allServices.map((svc) => {
+          const svcMethods: MethodOption[] = [];
           for (let i = 1; i <= 8; i++) {
             const mid = (svc as any)[`method_${i}`] as string | null;
             if (mid && methodMap[mid]) {
-              methods.push(methodMap[mid]);
+              const m = methodMap[mid];
+              svcMethods.push({
+                methodId: m.id,
+                methodName: m.method_name,
+                requiresTime: m.priority,
+                requiresAddress: m.address,
+              });
             }
           }
 
           const clinic = clinicMap[svc.clinic_id];
           return {
             serviceId: svc.id,
-            name: svc.service_name,
-            description: svc.description,
-            category: svc.category,
-            durationMinutes: svc.duration_minutes,
-            price: svc.price,
+            serviceName: svc.service_name,
             clinicId: svc.clinic_id,
-            clinicName: clinic?.name ?? null,
-            clinicAddress: clinic?.address ?? null,
+            clinicName: clinic?.name ?? "Unknown clinic",
+            clinicAddress: clinic?.address ?? "",
             doctorSelection: clinic?.doctor_selection ?? true,
-            methods: methods.map((m) => ({
-              methodId: m.id,
-              name: m.method_name,
-              requiresTime: m.priority,
-              requiresAddress: m.address,
-            })),
+            methods: svcMethods,
           };
         });
 
-        return JSON.stringify({ found: true, services: results });
+        await updateState({ serviceOptions });
+
+        // Return numbered list for the LLM to present
+        const display = serviceOptions.map((opt, i) => ({
+          index: i + 1,
+          service: opt.serviceName,
+          clinic: opt.clinicName,
+          address: opt.clinicAddress,
+          methods: opt.methods.length > 0
+            ? opt.methods.map((m) => m.methodName)
+            : ["In-clinic visit"],
+        }));
+
+        return JSON.stringify({
+          found: true,
+          count: display.length,
+          services: display,
+          instruction: "Present these options to the user. When they choose, call select_service with the index number.",
+        });
+      },
+    }),
+
+    select_service: tool({
+      description:
+        "Select a service from search_services results by index number. " +
+        "If the service has multiple methods, also pass the method index. " +
+        "If only one method, it is auto-selected.",
+      inputSchema: z.object({
+        index: z.number().describe("Service number from search_services list (1, 2, 3, ...)"),
+        methodIndex: z.number().optional().describe("Method number if the service has multiple methods (1, 2, ...)"),
+      }),
+      execute: async ({ index, methodIndex }) => {
+        const options = state.serviceOptions ?? [];
+        if (index < 1 || index > options.length) {
+          return JSON.stringify({
+            error: `Invalid selection. Choose a number between 1 and ${options.length}.`,
+          });
+        }
+
+        const service = options[index - 1];
+        let selectedMethodId: string | undefined;
+        let selectedMethod: MethodOption | undefined;
+
+        if (service.methods.length === 0) {
+          // No selectable methods
+        } else if (service.methods.length === 1) {
+          // Auto-select the only method
+          selectedMethod = service.methods[0];
+          selectedMethodId = selectedMethod.methodId;
+        } else if (methodIndex !== undefined) {
+          if (methodIndex < 1 || methodIndex > service.methods.length) {
+            return JSON.stringify({
+              error: `Invalid method. Choose between 1 and ${service.methods.length}.`,
+              methods: service.methods.map((m, i) => ({ index: i + 1, name: m.methodName })),
+            });
+          }
+          selectedMethod = service.methods[methodIndex - 1];
+          selectedMethodId = selectedMethod.methodId;
+        } else {
+          // Multiple methods, none selected — ask user to choose
+          return JSON.stringify({
+            needsMethodSelection: true,
+            service: service.serviceName,
+            clinic: service.clinicName,
+            methods: service.methods.map((m, i) => ({
+              index: i + 1,
+              name: m.methodName,
+              requiresTime: m.requiresTime,
+              requiresAddress: m.requiresAddress,
+            })),
+            instruction: "Ask the user which method they prefer, then call select_service again with the methodIndex.",
+          });
+        }
+
+        await updateState({
+          activeServiceId: service.serviceId,
+          activeClinicId: service.clinicId,
+          activeMethodId: selectedMethodId,
+        });
+
+        // Determine next step
+        const needsDoctors = service.doctorSelection;
+
+        return JSON.stringify({
+          success: true,
+          service: service.serviceName,
+          clinic: service.clinicName,
+          clinicAddress: service.clinicAddress,
+          method: selectedMethod?.methodName ?? "In-clinic visit",
+          requiresTime: selectedMethod?.requiresTime ?? false,
+          requiresAddress: selectedMethod?.requiresAddress ?? false,
+          nextStep: needsDoctors
+            ? "Call get_clinic_doctors to let the user pick a doctor."
+            : "Clinic assigns doctors. Proceed to ask for date/time.",
+        });
       },
     }),
 
     get_clinic_doctors: tool({
       description:
-        "Get doctors for a specific clinic. Returns doctor ID and name only. " +
-        "Call this after the user selects a clinic from search_services results.",
-      inputSchema: z.object({
-        clinicId: z.string().describe("Exact clinic UUID from search_services results (the clinicId field)"),
-      }),
-      execute: async ({ clinicId }) => {
+        "Get doctors for the selected clinic. Call after select_service. " +
+        "Takes no parameters — reads the clinic from the current selection. " +
+        "If only one doctor, they are auto-selected.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!state.activeClinicId) {
+          return JSON.stringify({ error: "No clinic selected. Call select_service first." });
+        }
+
         const { data: doctors, error } = await supabase
           .from("c_a_doctors")
           .select("id, name")
-          .eq("clinic_id", clinicId);
+          .eq("clinic_id", state.activeClinicId);
 
         if (error) {
           return JSON.stringify({ error: "Failed to load doctors", detail: error.message });
@@ -252,27 +335,74 @@ export function createLookupTools(
           return JSON.stringify({ found: false, message: "No doctors found for this clinic." });
         }
 
+        // Auto-select if only one doctor
+        if (doctors.length === 1) {
+          await updateState({
+            activeDoctorId: doctors[0].id,
+            doctorOptions: [{ doctorId: doctors[0].id, name: doctors[0].name }],
+          });
+          return JSON.stringify({
+            found: true,
+            autoSelected: true,
+            doctorName: doctors[0].name,
+            message: `Dr. ${doctors[0].name} is the doctor at this clinic.`,
+            nextStep: "Proceed to ask for date/time.",
+          });
+        }
+
+        const doctorOptions: DoctorOption[] = doctors.map((d) => ({
+          doctorId: d.id,
+          name: d.name,
+        }));
+
+        await updateState({ doctorOptions });
+
         return JSON.stringify({
           found: true,
-          doctors: doctors.map((d) => ({
-            doctorId: d.id,
-            name: d.name,
-          })),
+          doctors: doctorOptions.map((d, i) => ({ index: i + 1, name: d.name })),
+          instruction: "Present the doctors to the user. When they choose, call select_doctor with the index number.",
+        });
+      },
+    }),
+
+    select_doctor: tool({
+      description:
+        "Select a doctor by index number from get_clinic_doctors results.",
+      inputSchema: z.object({
+        index: z.number().describe("Doctor number from get_clinic_doctors list (1, 2, 3, ...)"),
+      }),
+      execute: async ({ index }) => {
+        const options = state.doctorOptions ?? [];
+        if (index < 1 || index > options.length) {
+          return JSON.stringify({
+            error: `Invalid selection. Choose a number between 1 and ${options.length}.`,
+          });
+        }
+
+        const doctor = options[index - 1];
+        await updateState({ activeDoctorId: doctor.doctorId });
+
+        return JSON.stringify({
+          success: true,
+          doctorName: doctor.name,
+          nextStep: "Proceed to ask for date/time.",
         });
       },
     }),
 
     get_clinic_availability: tool({
       description:
-        "Check clinic opening hours for a given day. " +
-        "Returns operating hours, lunch breaks, and already-booked time slots (NOT available slots — you must calculate free times from the gaps).",
+        "Check clinic opening hours for a given day. Reads the clinic from current selection. " +
+        "Returns operating hours, lunch breaks, and booked slots. You must calculate free times from gaps.",
       inputSchema: z.object({
-        clinicId: z.string().describe("Exact clinic UUID from search_services results"),
         date: z.string().describe("Date to check in YYYY-MM-DD format"),
-        doctorId: z.string().optional().describe("Exact doctor UUID from get_clinic_doctors (optional)"),
       }),
-      execute: async ({ clinicId, date, doctorId }) => {
-        // Get clinic hours
+      execute: async ({ date }) => {
+        const clinicId = state.activeClinicId;
+        if (!clinicId) {
+          return JSON.stringify({ error: "No clinic selected. Call select_service first." });
+        }
+
         const { data: hours, error: hoursError } = await supabase
           .from("c_a_clinic_available_time")
           .select("*")
@@ -284,7 +414,6 @@ export function createLookupTools(
           return JSON.stringify({ error: "Could not find clinic hours" });
         }
 
-        // Determine day of week
         const dayOfWeek = new Date(date).toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
 
         const dayStart = hours[`${dayOfWeek}_start` as keyof typeof hours];
@@ -296,21 +425,19 @@ export function createLookupTools(
           return JSON.stringify({ open: false, message: `Clinic is closed on ${dayOfWeek}s.` });
         }
 
-        // Check for self-declared holidays
         const holidays: string[] = hours.holiday_self_declared ?? [];
         if (holidays.includes(date)) {
           return JSON.stringify({ open: false, message: "Clinic is closed on this date (holiday)." });
         }
 
-        // Get existing bookings for the date
         let bookingQuery = supabase
           .from("c_s_bookings")
           .select("id, original_time, new_time, status, duration_minutes")
           .or(`original_date.eq.${date},new_date.eq.${date}`)
           .not("status", "in", "(cancelled,declined)");
 
-        if (doctorId) {
-          bookingQuery = bookingQuery.eq("doctor_id", doctorId);
+        if (state.activeDoctorId) {
+          bookingQuery = bookingQuery.eq("doctor_id", state.activeDoctorId);
         }
 
         const { data: bookings } = await bookingQuery;

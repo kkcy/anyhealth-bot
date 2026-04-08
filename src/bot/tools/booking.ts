@@ -1,7 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
-import { validateUuids } from "./validate";
 import type { ThreadState } from "@/types";
 
 export function createBookingTools(
@@ -13,62 +12,58 @@ export function createBookingTools(
   return {
     create_booking: tool({
       description:
-        "Create a new appointment booking. Requires patient selection first. " +
-        "The 'time' field is required if the service method has requiresTime=true. " +
-        "The 'address' field is required if the service method has requiresAddress=true.",
+        "Create a new appointment booking. Reads patient, service, clinic, method, and doctor from current selections. " +
+        "Call select_service (and optionally select_doctor) before this. " +
+        "Only pass date, time, and address.",
       inputSchema: z.object({
-        patientId: z.string().describe("Exact patient UUID from user_lookup results (e.g. 'a1b2c3d4-...')"),
-        clinicId: z.string().describe("Exact clinic UUID from search_services results (the clinicId field)"),
-        serviceId: z.string().describe("Exact service UUID from search_services results (the serviceId field)"),
-        methodId: z.string().optional().describe("Exact method UUID from search_services methods array (the methodId field)"),
-        doctorId: z.string().describe("Exact doctor UUID from get_clinic_doctors results (the doctorId field)"),
         date: z.string().describe("Appointment date in YYYY-MM-DD format"),
-        time: z.string().optional().describe("Appointment time in HH:mm format (required if method.requiresTime)"),
-        address: z.string().max(500).optional().describe("Location for house calls (required if method.requiresAddress)"),
+        time: z.string().optional().describe("Appointment time in HH:mm format (required if method requiresTime)"),
+        address: z.string().max(500).optional().describe("Location for house calls (required if method requiresAddress)"),
         details: z.string().max(2000).optional().describe("Additional notes or details"),
         bookingType: z.enum(["checkup", "consultation", "vaccination"]).default("consultation"),
       }),
-      execute: async ({ patientId, clinicId, serviceId, methodId, doctorId, date, time, address, details, bookingType }) => {
-        // Validate UUIDs — returns clear error if LLM passed placeholder strings
-        const uuidErr = validateUuids([
-          { value: patientId, name: "patientId", source: "user_lookup" },
-          { value: clinicId, name: "clinicId", source: "search_services" },
-          { value: serviceId, name: "serviceId", source: "search_services" },
-          { value: methodId, name: "methodId", source: "search_services methods array" },
-          { value: doctorId, name: "doctorId", source: "get_clinic_doctors" },
-        ]);
-        if (uuidErr) return uuidErr;
+      execute: async ({ date, time, address, details, bookingType }) => {
+        // All IDs come from state — no UUIDs from the LLM
+        const patientId = state.activePatientId;
+        const serviceId = state.activeServiceId;
+        const clinicId = state.activeClinicId;
+        const methodId = state.activeMethodId;
+        const doctorId = state.activeDoctorId;
 
         if (!state.userId) {
           return JSON.stringify({ error: "Please start a conversation first. Call user_lookup." });
         }
-
-        // Verify patient belongs to this user
-        const patient = state.patients?.find((p) => p.id === patientId);
-        if (!patient) {
-          return JSON.stringify({ error: "Patient not found. Please call user_lookup first." });
+        if (!patientId) {
+          return JSON.stringify({ error: "No patient selected. Call user_lookup or select_patient first." });
+        }
+        if (!serviceId || !clinicId) {
+          return JSON.stringify({ error: "No service selected. Call search_services then select_service first." });
+        }
+        if (!doctorId) {
+          return JSON.stringify({ error: "No doctor selected. Call get_clinic_doctors then select_doctor first." });
         }
 
-        // Get service duration/name and verify it belongs to the specified clinic
+        const patient = state.patients?.find((p) => p.id === patientId);
+        if (!patient) {
+          return JSON.stringify({ error: "Patient not found in state." });
+        }
+
+        // Get service duration
         let { data: service } = await supabase
           .from("c_a_clinic_service")
-          .select("service_name, duration_minutes, clinic_id")
+          .select("service_name, duration_minutes")
           .eq("id", serviceId)
           .maybeSingle();
 
         if (!service) {
           ({ data: service } = await supabase
             .from("tcm_a_clinic_service")
-            .select("service_name, duration_minutes, clinic_id")
+            .select("service_name, duration_minutes")
             .eq("id", serviceId)
             .maybeSingle());
         }
 
-        if (service && service.clinic_id !== clinicId) {
-          return JSON.stringify({ error: "This service does not belong to the selected clinic. Please use the clinicId returned by search_services." });
-        }
-
-        // Validate conditional fields if method is specified
+        // Validate conditional fields
         if (methodId) {
           const { data: method } = await supabase
             .from("c_a_service_method")
@@ -108,8 +103,6 @@ export function createBookingTools(
         if (error) {
           return JSON.stringify({ error: "Failed to create booking", detail: error.message });
         }
-
-        await updateState({ activePatientId: patientId });
 
         // Fetch doctor and clinic names for confirmation
         const [{ data: doctor }, { data: clinic }] = await Promise.all([
