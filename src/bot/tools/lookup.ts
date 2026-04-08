@@ -222,7 +222,7 @@ export function createLookupTools(
       execute: async ({ clinicId }) => {
         const { data: doctors, error } = await supabase
           .from("c_a_doctors")
-          .select("id, name, specialty, qualification")
+          .select("*")
           .eq("clinic_id", clinicId)
           .eq("is_active", true);
 
@@ -236,11 +236,11 @@ export function createLookupTools(
 
         return JSON.stringify({
           found: true,
-          doctors: doctors.map((d) => ({
+          doctors: doctors.map((d: Record<string, unknown>) => ({
             doctorId: d.id,
             name: d.name,
-            specialty: d.specialty,
-            qualification: d.qualification,
+            ...(d.specialty ? { specialty: d.specialty } : {}),
+            ...(d.qualification ? { qualification: d.qualification } : {}),
           })),
         });
       },
