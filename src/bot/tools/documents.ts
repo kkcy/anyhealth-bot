@@ -137,11 +137,11 @@ export function createDocumentTools(
 
         const { data: diagnoses } = await diagQuery;
 
-        // Fetch reports with PDF URLs
+        // Fetch reports with PDF URLs — filter by visit IDs to scope to active patient
         const { data: reports } = await supabase
           .from("c_report_consult")
           .select("id, case_id, pdf_url, service_name, time, doctor_id")
-          .eq("whatsapp_number", state.phone)
+          .in("case_id", vhIds)
           .eq("is_deleted", false)
           .eq("sent", true)
           .order("time", { ascending: false });
