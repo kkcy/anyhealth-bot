@@ -112,6 +112,7 @@ export function createLookupTools(
           .split(/\s+/)
           .filter((w) => w.length > 1);
 
+        // Use OR for DB query (broad fetch), then filter in JS to require ALL words match
         const orConditions = words
           .flatMap((word) => [
             `service_name.ilike.%${word}%`,
@@ -129,7 +130,7 @@ export function createLookupTools(
           `)
           .eq("is_active", true)
           .or(orConditions)
-          .limit(10);
+          .limit(30);
 
         const { data: tcmServices, error: tcmError } = await supabase
           .from("tcm_a_clinic_service")
@@ -140,13 +141,18 @@ export function createLookupTools(
           `)
           .eq("is_active", true)
           .or(orConditions)
-          .limit(10);
+          .limit(30);
 
         if (cError || tcmError) {
           return JSON.stringify({ error: "Failed to search services", detail: cError?.message || tcmError?.message });
         }
 
-        const allServices = [...(cServices ?? []), ...(tcmServices ?? [])];
+        // Require ALL words to match somewhere in the service (name, description, or category)
+        const rawServices = [...(cServices ?? []), ...(tcmServices ?? [])];
+        const allServices = rawServices.filter((svc) => {
+          const text = `${svc.service_name} ${svc.description ?? ""} ${svc.category ?? ""}`.toLowerCase();
+          return words.every((w) => text.includes(w));
+        }).slice(0, 10);
 
         if (allServices.length === 0) {
           return JSON.stringify({ found: false, message: "No services found matching your description." });
