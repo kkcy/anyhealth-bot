@@ -1,9 +1,9 @@
 import "dotenv/config";
-import { generateText, stepCountIs } from "ai";
-import { getModel } from "../src/lib/config";
+import { generateText } from "../src/lib/config";
 import { buildSystemPrompt } from "../src/bot/prompt";
 import { createTools } from "../src/bot/tools";
 import type { ThreadState } from "../src/types";
+import { stepCountIs } from "ai";
 
 const testPhone = process.argv[2] ?? "60123456789";
 const userMessage = process.argv[3] ?? "Hi, I want to book a checkup";
@@ -26,7 +26,6 @@ async function main() {
   const tools = createTools(state, updateState);
 
   const result = await generateText({
-    model: getModel(),
     system: buildSystemPrompt(),
     tools,
     stopWhen: stepCountIs(8),

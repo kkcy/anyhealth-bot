@@ -145,6 +145,7 @@ AI_GATEWAY_API_KEY=              # Vercel AI Gateway (production)
 WHATSAPP_ACCESS_TOKEN=
 WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_VERIFY_TOKEN=           # Webhook verification
+WHATSAPP_APP_SECRET=             # Meta App Secret for signature verification
 
 # Database
 SUPABASE_URL=

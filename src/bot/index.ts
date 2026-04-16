@@ -1,12 +1,12 @@
 import { Chat, toAiMessages } from "chat";
 import { createWhatsAppAdapter } from "@chat-adapter/whatsapp";
 import { createPostgresState } from "@chat-adapter/state-pg";
-import { generateText, stepCountIs } from "ai";
+import { generateText } from "@/lib/config";
 import { createTools } from "./tools";
 import { buildSystemPrompt } from "./prompt";
-import { getModel } from "@/lib/config";
 import { validateEnv } from "@/lib/env";
 import type { ThreadState } from "@/types";
+import { stepCountIs } from "ai";
 
 let _bot: ReturnType<typeof createBot> | null = null;
 
@@ -97,6 +97,15 @@ async function handleMessage(thread: any, message: any) {
     state.phone = extractPhone(thread);
   }
 
+  console.log("[BOT] Loaded state:", JSON.stringify({
+    userId: state.userId,
+    activePatientId: state.activePatientId,
+    activeClinicId: state.activeClinicId,
+    activeServiceId: state.activeServiceId,
+    activeMethodId: state.activeMethodId,
+    activeDoctorId: state.activeDoctorId,
+  }));
+
   async function updateState(partial: Partial<ThreadState>) {
     Object.assign(state, partial);
     await thread.setState(state);
@@ -137,7 +146,6 @@ async function handleMessage(thread: any, message: any) {
 
   try {
     const result = await generateText({
-      model: getModel(),
       system: systemPrompt,
       tools,
       onStepFinish({ text, toolCalls, toolResults, finishReason }) {
