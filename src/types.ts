@@ -9,6 +9,7 @@ export interface ClinicOption {
   clinicName: string;
   clinicAddress: string;
   doctorSelection: boolean;
+  newPatientLimit: number | null;
   matchingServiceCount: number;
 }
 

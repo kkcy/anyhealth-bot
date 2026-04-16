@@ -3,6 +3,29 @@ import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
 import type { ThreadState } from "@/types";
 
+function normalizeNewPatientLimit(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseTimeToMinutes(value: string): number | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function hasOverlap(startA: number, durationA: number, startB: number, durationB: number): boolean {
+  const endA = startA + durationA;
+  const endB = startB + durationB;
+  return startA < endB && startB < endA;
+}
+
 export function createBookingTools(
   state: ThreadState,
   updateState: (partial: Partial<ThreadState>) => Promise<void>
@@ -13,22 +36,24 @@ export function createBookingTools(
     create_booking: tool({
       description:
         "Create a new appointment booking. Reads patient, service, clinic, method, and doctor from current selections. " +
-        "Call select_service (and optionally select_doctor) before this. " +
-        "Only pass date, time, and address.",
+        "Call select_service first and include confirmation before finalizing.",
       inputSchema: z.object({
         date: z.string().describe("Appointment date in YYYY-MM-DD format"),
         time: z.string().optional().describe("Appointment time in HH:mm format (required if method requiresTime)"),
         address: z.string().max(500).optional().describe("Location for house calls (required if method requiresAddress)"),
-        details: z.string().max(2000).optional().describe("Additional notes or details"),
+        reminderRemark: z.string().max(2000).optional().describe("Reminder remark to show in booking summary"),
+        details: z.string().max(2000).optional().describe("Deprecated alias for reminderRemark"),
+        isNewPatient: z.boolean().optional().describe("Whether this is a new patient booking"),
+        confirmed: z.boolean().describe("Must be true after user confirms all booking details"),
         bookingType: z.enum(["checkup", "consultation", "vaccination"]).default("consultation"),
       }),
-      execute: async ({ date, time, address, details, bookingType }) => {
+      execute: async ({ date, time, address, reminderRemark, details, isNewPatient, confirmed, bookingType }) => {
         // All IDs come from state — no UUIDs from the LLM
-        const patientId = state.activePatientId;
-        const serviceId = state.activeServiceId;
-        const clinicId = state.activeClinicId;
-        const methodId = state.activeMethodId;
-        const doctorId = state.activeDoctorId;
+        let patientId = state.activePatientId;
+        let serviceId = state.activeServiceId;
+        let clinicId = state.activeClinicId;
+        let methodId = state.activeMethodId;
+        let doctorId = state.activeDoctorId;
 
         if (!state.userId) {
           return JSON.stringify({ error: "Please start a conversation first. Call user_lookup." });
@@ -36,11 +61,80 @@ export function createBookingTools(
         if (!patientId) {
           return JSON.stringify({ error: "No patient selected. Call user_lookup or select_patient first." });
         }
-        if (!serviceId || !clinicId) {
-          return JSON.stringify({ error: "No service selected. Call search_services then select_service first." });
+        if (!confirmed) {
+          return JSON.stringify({ error: "Please confirm all booking details before finalizing the booking." });
         }
+
+        // Auto-resolve missing selections when there's only one option
+        if (!serviceId && state.serviceOptions?.length === 1) {
+          const svc = state.serviceOptions[0];
+          serviceId = svc.serviceId;
+          methodId = svc.methods.length === 1 ? svc.methods[0].methodId : undefined;
+          await updateState({ activeServiceId: serviceId, activeMethodId: methodId });
+          console.log("[BOOKING] Auto-resolved service:", serviceId);
+        }
+
+        if (!clinicId && state.clinicOptions?.length === 1) {
+          clinicId = state.clinicOptions[0].clinicId;
+          await updateState({ activeClinicId: clinicId });
+          console.log("[BOOKING] Auto-resolved clinic:", clinicId);
+        }
+
+        console.log("[BOOKING] State at create_booking:", JSON.stringify({
+          userId: state.userId, patientId, serviceId, clinicId, methodId, doctorId,
+        }));
+
+        if (!serviceId || !clinicId) {
+          return JSON.stringify({ error: "No service selected. Call select_service first." });
+        }
+
+        const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === clinicId);
+        let clinicDoctorSelection = clinicOpt?.doctorSelection ?? true;
+        let newPatientLimit = clinicOpt?.newPatientLimit ?? null;
+
+        // Best-effort fallback for live DB schema differences (doctor_selection vs dr_selection).
+        const { data: clinicMeta } = await supabase
+          .from("c_a_clinics")
+          .select("*")
+          .eq("id", clinicId)
+          .maybeSingle();
+        if (clinicMeta) {
+          if (typeof clinicMeta.dr_selection === "boolean") {
+            clinicDoctorSelection = clinicMeta.dr_selection;
+          } else if (typeof clinicMeta.doctor_selection === "boolean") {
+            clinicDoctorSelection = clinicMeta.doctor_selection;
+          }
+          newPatientLimit = normalizeNewPatientLimit(clinicMeta.new_patient_limit);
+        }
+
+        const { data: clinicDoctors, error: doctorLoadError } = await supabase
+          .from("c_a_doctors")
+          .select("id, name")
+          .eq("clinic_id", clinicId)
+          .order("name", { ascending: true });
+        if (doctorLoadError) {
+          return JSON.stringify({ error: "Failed to load clinic doctors", detail: doctorLoadError.message });
+        }
+
+        const doctors = clinicDoctors ?? [];
+        if (doctors.length === 0) {
+          return JSON.stringify({ error: "No doctors found for this clinic." });
+        }
+
+        if (doctorId && !doctors.some((d) => d.id === doctorId)) {
+          return JSON.stringify({ error: "Selected doctor does not belong to the selected clinic." });
+        }
+
         if (!doctorId) {
-          return JSON.stringify({ error: "No doctor selected. Call get_clinic_doctors then select_doctor first." });
+          if (clinicDoctorSelection && doctors.length > 1) {
+            return JSON.stringify({
+              error: "This clinic requires doctor selection. Call select_doctor first.",
+              doctors: doctors.map((d, i) => ({ index: i + 1, name: d.name })),
+            });
+          }
+          doctorId = doctors[0].id;
+          await updateState({ activeDoctorId: doctorId });
+          console.log("[BOOKING] Auto-assigned doctor:", doctorId);
         }
 
         const patient = state.patients?.find((p) => p.id === patientId);
@@ -79,25 +173,88 @@ export function createBookingTools(
           }
         }
 
+        if (!doctorId) {
+          return JSON.stringify({ error: "No doctor selected. Call select_doctor first." });
+        }
+
+        const appointmentDuration = service?.duration_minutes ?? 30;
+        const finalReminderRemark = (reminderRemark ?? details)?.trim() || null;
+
+        if (newPatientLimit !== null && isNewPatient === undefined) {
+          return JSON.stringify({
+            error: "This clinic has a new-patient slot limit. Please confirm whether this is a new patient booking.",
+          });
+        }
+
+        const finalIsNewPatient = isNewPatient ?? false;
+        if (newPatientLimit !== null && finalIsNewPatient) {
+          if (!time) {
+            return JSON.stringify({
+              error: "New patient slot limit requires a specific time. Please provide time in HH:mm format.",
+            });
+          }
+
+          const requestedStart = parseTimeToMinutes(time);
+          if (requestedStart === null) {
+            return JSON.stringify({ error: "Invalid time format. Please provide time in HH:mm format." });
+          }
+
+          const clinicDoctorIds = doctors.map((d) => d.id);
+          const { data: existingNewPatientBookings, error: existingError } = await supabase
+            .from("c_s_bookings")
+            .select("id, doctor_id, original_time, new_time, duration_minutes")
+            .or(`original_date.eq.${date},new_date.eq.${date}`)
+            .not("status", "in", "(cancelled,declined)")
+            .eq("new_patient", true)
+            .in("doctor_id", clinicDoctorIds);
+          if (existingError) {
+            return JSON.stringify({
+              error: "Failed to validate new-patient slot limit",
+              detail: existingError.message,
+            });
+          }
+
+          let overlappingNewPatientCount = 0;
+          for (const booking of existingNewPatientBookings ?? []) {
+            const slotTime = booking.new_time ?? booking.original_time;
+            const bookingStart = slotTime ? parseTimeToMinutes(slotTime) : null;
+            if (bookingStart === null) continue;
+            const bookingDuration = booking.duration_minutes && booking.duration_minutes > 0
+              ? booking.duration_minutes
+              : 30;
+            if (hasOverlap(requestedStart, appointmentDuration, bookingStart, bookingDuration)) {
+              overlappingNewPatientCount += 1;
+            }
+          }
+
+          if (overlappingNewPatientCount >= newPatientLimit) {
+            return JSON.stringify({
+              error: `New patient limit reached for ${time}. Please choose another time slot.`,
+              limit: newPatientLimit,
+              currentNewPatientsInSlot: overlappingNewPatientCount,
+            });
+          }
+        }
+
         const payload = {
           user_id: state.userId,
           doctor_id: doctorId,
           service_id: serviceId,
           booking_type: bookingType,
-          details: details?.trim() || null,
+          details: finalReminderRemark,
           original_date: date,
           original_time: time ?? "00:00",
           status: "pending",
-          duration_minutes: service?.duration_minutes ?? 30,
+          duration_minutes: appointmentDuration,
           method_id: methodId || null,
           address: address?.trim() || null,
-          new_patient: false,
+          new_patient: finalIsNewPatient,
         };
 
         const { data: booking, error } = await supabase
           .from("c_s_bookings")
           .insert(payload)
-          .select("id, original_date, original_time, status")
+          .select("id, original_date, original_time, status, details, new_patient")
           .single();
 
         if (error) {
@@ -110,12 +267,23 @@ export function createBookingTools(
           supabase.from("c_a_clinics").select("name, address").eq("id", clinicId).maybeSingle(),
         ]);
 
+        // Clear booking selections to prevent duplicate bookings in the same turn
+        await updateState({
+          activeServiceId: undefined,
+          activeMethodId: undefined,
+          activeDoctorId: undefined,
+          serviceOptions: undefined,
+          doctorOptions: undefined,
+        });
+
         return JSON.stringify({
           success: true,
           bookingId: booking.id,
           date: booking.original_date,
           time: booking.original_time,
           status: booking.status,
+          isNewPatient: booking.new_patient,
+          reminderRemark: booking.details,
           patientName: patient.name,
           serviceName: service?.service_name ?? null,
           doctorName: doctor?.name ?? null,
@@ -190,6 +358,7 @@ export function createBookingTools(
             doctorName: doctor?.name ?? null,
             clinicName: doctor?.clinic_id ? clinicMap[doctor.clinic_id] ?? null : null,
             details: b.details,
+            reminderRemark: b.details,
             address: b.address,
           };
         });

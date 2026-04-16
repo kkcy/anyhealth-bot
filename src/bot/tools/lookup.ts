@@ -9,6 +9,43 @@ export function createLookupTools(
 ) {
   const supabase = getSupabase();
 
+  function normalizeDoctorSelection(clinic: Record<string, unknown>): boolean {
+    const drSelection = clinic.dr_selection;
+    if (typeof drSelection === "boolean") return drSelection;
+    const doctorSelection = clinic.doctor_selection;
+    if (typeof doctorSelection === "boolean") return doctorSelection;
+    return true;
+  }
+
+  function normalizeNewPatientLimit(value: unknown): number | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  async function loadClinicsByIds(clinicIds: string[]) {
+    const selectAttempts = [
+      "id, name, address, doctor_selection, dr_selection, new_patient_limit",
+      "id, name, address, doctor_selection, new_patient_limit",
+      "id, name, address, doctor_selection",
+    ];
+
+    let lastError: string | undefined;
+    for (const selectClause of selectAttempts) {
+      const { data, error } = await supabase
+        .from("c_a_clinics")
+        .select(selectClause)
+        .in("id", clinicIds);
+      if (!error && data) {
+        return { data: data as unknown as Record<string, unknown>[], error: undefined };
+      }
+      lastError = error?.message;
+    }
+
+    return { data: [] as Record<string, unknown>[], error: lastError ?? "Failed to load clinics." };
+  }
+
   // Shared helper: fetch and return services at a specific clinic matching a query
   async function fetchClinicServices(clinic: ClinicOption, query: string, words: string[]) {
     const orConditions = words
@@ -247,28 +284,37 @@ export function createLookupTools(
         }
 
         const clinicIds = Object.keys(clinicCounts);
-        const { data: clinics } = await supabase
-          .from("c_a_clinics")
-          .select("id, name, address, doctor_selection")
-          .in("id", clinicIds);
+        const { data: clinics, error: clinicLoadError } = await loadClinicsByIds(clinicIds);
+
+        if (clinicLoadError) {
+          return JSON.stringify({ error: "Failed to load clinics", detail: clinicLoadError });
+        }
 
         if (!clinics || clinics.length === 0) {
           return JSON.stringify({ found: false, message: "No clinics found." });
         }
 
-        const clinicOptions: ClinicOption[] = clinics.map((c) => ({
-          clinicId: c.id,
-          clinicName: c.name,
-          clinicAddress: c.address,
-          doctorSelection: c.doctor_selection ?? true,
-          matchingServiceCount: clinicCounts[c.id] ?? 0,
-        }));
+        const clinicOptions: ClinicOption[] = clinics.map((c) => {
+          const clinicId = String(c.id ?? "");
+          return {
+            clinicId,
+            clinicName: String(c.name ?? ""),
+            clinicAddress: String(c.address ?? ""),
+            doctorSelection: normalizeDoctorSelection(c),
+            newPatientLimit: normalizeNewPatientLimit(c.new_patient_limit),
+            matchingServiceCount: clinicCounts[clinicId] ?? 0,
+          };
+        });
 
         await updateState({ clinicOptions, lastSearchQuery: query });
 
         // Auto-select if only one clinic
         if (clinicOptions.length === 1) {
-          await updateState({ activeClinicId: clinicOptions[0].clinicId });
+          await updateState({
+            activeClinicId: clinicOptions[0].clinicId,
+            activeDoctorId: undefined,
+            doctorOptions: undefined,
+          });
           // Immediately fetch services for this clinic
           return await fetchClinicServices(clinicOptions[0], query, words);
         }
@@ -301,7 +347,11 @@ export function createLookupTools(
         }
 
         const clinic = options[index - 1];
-        await updateState({ activeClinicId: clinic.clinicId });
+        await updateState({
+          activeClinicId: clinic.clinicId,
+          activeDoctorId: undefined,
+          doctorOptions: undefined,
+        });
 
         const query = state.lastSearchQuery ?? "";
         const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 1);
@@ -373,9 +423,10 @@ export function createLookupTools(
           method: selectedMethod?.methodName ?? "In-clinic visit",
           requiresTime: selectedMethod?.requiresTime ?? false,
           requiresAddress: selectedMethod?.requiresAddress ?? false,
+          newPatientLimit: clinicOpt?.newPatientLimit ?? null,
           nextStep: clinicOpt?.doctorSelection
             ? "Call get_clinic_doctors to let the user pick a doctor."
-            : "Clinic assigns doctors. Proceed to ask for date/time.",
+            : "Clinic assigns doctors. Ask for new/existing patient if needed, then proceed to date/time.",
         });
       },
     }),
@@ -465,12 +516,16 @@ export function createLookupTools(
         "Returns operating hours, lunch breaks, and booked slots. You must calculate free times from gaps.",
       inputSchema: z.object({
         date: z.string().describe("Date to check in YYYY-MM-DD format"),
+        isNewPatient: z.boolean().optional().describe("Whether this booking is for a new patient"),
       }),
-      execute: async ({ date }) => {
+      execute: async ({ date, isNewPatient }) => {
         const clinicId = state.activeClinicId;
         if (!clinicId) {
           return JSON.stringify({ error: "No clinic selected. Call select_service first." });
         }
+
+        const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === clinicId);
+        const newPatientLimit = clinicOpt?.newPatientLimit ?? null;
 
         const { data: hours, error: hoursError } = await supabase
           .from("c_a_clinic_available_time")
@@ -499,22 +554,69 @@ export function createLookupTools(
           return JSON.stringify({ open: false, message: "Clinic is closed on this date (holiday)." });
         }
 
+        const { data: clinicDoctors, error: doctorError } = await supabase
+          .from("c_a_doctors")
+          .select("id")
+          .eq("clinic_id", clinicId);
+
+        if (doctorError) {
+          return JSON.stringify({ error: "Failed to load clinic doctors", detail: doctorError.message });
+        }
+
+        const clinicDoctorIds = (clinicDoctors ?? []).map((d) => d.id);
+        if (clinicDoctorIds.length === 0) {
+          return JSON.stringify({
+            open: true,
+            dayOfWeek,
+            hours: { start: dayStart, end: dayEnd },
+            lunch: lunchStart && lunchEnd ? { start: lunchStart, end: lunchEnd } : null,
+            bookedSlots: [],
+            newPatientLimit,
+            newPatientBookedSlots: [],
+            newPatientSlotsAtLimit: [],
+          });
+        }
+
         let bookingQuery = supabase
           .from("c_s_bookings")
-          .select("id, original_time, new_time, status, duration_minutes")
+          .select("id, doctor_id, original_time, new_time, status, duration_minutes, new_patient")
           .or(`original_date.eq.${date},new_date.eq.${date}`)
           .not("status", "in", "(cancelled,declined)");
 
-        if (state.activeDoctorId) {
+        if (state.activeDoctorId && clinicDoctorIds.includes(state.activeDoctorId)) {
           bookingQuery = bookingQuery.eq("doctor_id", state.activeDoctorId);
+        } else {
+          bookingQuery = bookingQuery.in("doctor_id", clinicDoctorIds);
         }
 
         const { data: bookings } = await bookingQuery;
 
-        const bookedTimes = (bookings ?? []).map((b) => ({
+        const scopedBookings = (bookings ?? []).filter((b) => clinicDoctorIds.includes(b.doctor_id));
+
+        const bookedTimes = scopedBookings.map((b) => ({
           time: b.new_time ?? b.original_time,
           duration: b.duration_minutes,
         }));
+
+        const newPatientBookedSlots = scopedBookings
+          .filter((b) => b.new_patient === true)
+          .map((b) => ({
+            time: b.new_time ?? b.original_time,
+            duration: b.duration_minutes,
+          }));
+
+        const countByStartTime: Record<string, number> = {};
+        for (const slot of newPatientBookedSlots) {
+          if (!slot.time) continue;
+          countByStartTime[slot.time] = (countByStartTime[slot.time] ?? 0) + 1;
+        }
+
+        const newPatientSlotsAtLimit =
+          isNewPatient && newPatientLimit !== null
+            ? Object.entries(countByStartTime)
+                .filter(([, count]) => count >= newPatientLimit)
+                .map(([time, count]) => ({ time, count, limit: newPatientLimit }))
+            : [];
 
         return JSON.stringify({
           open: true,
@@ -522,6 +624,9 @@ export function createLookupTools(
           hours: { start: dayStart, end: dayEnd },
           lunch: lunchStart && lunchEnd ? { start: lunchStart, end: lunchEnd } : null,
           bookedSlots: bookedTimes,
+          newPatientLimit,
+          newPatientBookedSlots,
+          newPatientSlotsAtLimit,
         });
       },
     }),
