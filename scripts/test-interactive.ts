@@ -75,9 +75,16 @@ interface CaseContext {
   expect: (cond: boolean, msg: string) => void;
 }
 
-function pickTimeFromAssistantText(text: string): string | null {
-  const m = text.match(/\b(1[0-2]|0?[1-9]):[0-5][0-9]\s?(AM|PM)\b/i);
-  return m ? m[0].replace(/\s+/g, " ").trim() : null;
+function pickTimeFromAssistantText(text: string, exclude: Set<string>): string | null {
+  const re = /\b(1[0-2]|0?[1-9]):[0-5][0-9]\s?(AM|PM)\b/gi;
+  const matches: string[] = [];
+  for (const m of text.matchAll(re)) {
+    matches.push(m[0].replace(/\s+/g, " ").trim().toUpperCase());
+  }
+  for (const t of matches) {
+    if (!exclude.has(t)) return t;
+  }
+  return null;
 }
 
 const CASES: CaseSpec[] = [
@@ -118,22 +125,26 @@ const CASES: CaseSpec[] = [
     id: "full-booking-flow",
     phone: process.env.SMOKE_PHONE ?? "60174421238",
     async run(thread, ctx) {
-      const nextMonday = (() => {
+      const targetDate = (() => {
         const d = new Date();
+        // pick the next Wednesday so we sidestep weekend closures
         const day = d.getDay();
-        const diff = ((1 - day + 7) % 7) || 7;
+        const diff = ((3 - day + 7) % 7) || 7;
         d.setDate(d.getDate() + diff);
         return d.toISOString().slice(0, 10);
       })();
+      const triedTimes = new Set<string>();
+      const initialTime = "8:00 AM";
+      triedTimes.add(initialTime.toUpperCase());
 
       let last = await ctx.step("ask to book", async () => {
         await deliverUserText(
           thread,
-          `I want to book a checkup at any clinic for ${nextMonday}.`
+          `I want to book a checkup at any clinic on ${targetDate} at ${initialTime}.`
         );
       });
 
-      let safety = 12;
+      let safety = 20;
       while (safety-- > 0) {
         const list = last.captured.find((c) => c.kind === "list");
         const buttons = last.captured.find((c) => c.kind === "buttons");
@@ -168,30 +179,51 @@ const CASES: CaseSpec[] = [
           break;
         }
 
-        const time = pickTimeFromAssistantText(lastText);
-        if (time) {
-          last = await ctx.step(`reply with time "${time}"`, async () => {
-            await deliverUserText(thread, `Please book me at ${time}.`);
+        const askingForDifferentTime = /already booked|fully booked|not available|unavailable|alternative time|different time|another time/i.test(
+          lastText
+        );
+
+        if (askingForDifferentTime) {
+          const altTime = pickTimeFromAssistantText(lastText, triedTimes);
+          if (altTime) {
+            triedTimes.add(altTime);
+            last = await ctx.step(`switch time to "${altTime}"`, async () => {
+              await deliverUserText(thread, `Use ${altTime} instead please.`);
+            });
+            continue;
+          }
+        }
+
+        if (/which date|what date|date.*book|prefer.*date|provide.*date|different date|closed/i.test(lastText)) {
+          last = await ctx.step("re-supply date", async () => {
+            const fallback = pickTimeFromAssistantText(lastText, triedTimes) ?? initialTime;
+            triedTimes.add(fallback);
+            await deliverUserText(thread, `Please book on ${targetDate} at ${fallback}.`);
           });
           continue;
         }
 
-        if (/which date|what date|date.*book|prefer.*date/i.test(lastText)) {
-          last = await ctx.step("reply with date", async () => {
-            await deliverUserText(thread, `Tomorrow ${nextMonday} please.`);
-          });
-          continue;
-        }
-
-        last = await ctx.step("nudge to confirm", async () => {
-          await deliverUserText(thread, "Please proceed and confirm the booking.");
+        last = await ctx.step("neutral nudge", async () => {
+          await deliverUserText(thread, "OK go ahead.");
         });
       }
 
       ctx.expect(safety > 0, "exceeded turn budget without finishing booking");
       ctx.expect(
+        ctx.steps.some((s) => s.captured.some((c) => c.kind === "buttons")),
+        "expected yes/no confirm buttons before create_booking"
+      );
+      ctx.expect(
         thread.posted.some((p) => /created|booking id|successfully/i.test(p)),
         "expected final booking confirmation message"
+      );
+
+      const clinicListSteps = ctx.steps.filter((s) =>
+        s.captured.some((c) => c.kind === "list" && /choose a clinic/i.test(c.body))
+      ).length;
+      ctx.expect(
+        clinicListSteps <= 1,
+        `expected clinic list emitted at most once (got ${clinicListSteps}) — re-search loop`
       );
     },
   },

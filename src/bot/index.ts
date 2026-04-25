@@ -80,7 +80,6 @@ function createBot() {
         list_reply: { id: event.actionId, title: event.value ?? event.actionId },
       },
     };
-    console.log(`[BOT] onAction actionId=${event.actionId} value=${event.value}`);
     await handleMessage(event.thread, synthetic);
   });
 
@@ -186,7 +185,10 @@ function mapInteractiveReplyToText(replyId: string | undefined): string | undefi
   return undefined;
 }
 
-function buildInteractivePlanFromToolResults(toolResults: any[] | undefined): InteractivePlan | undefined {
+function buildInteractivePlanFromToolResults(
+  toolResults: any[] | undefined,
+  state: ThreadState
+): InteractivePlan | undefined {
   if (!toolResults?.length) return undefined;
 
   for (let i = toolResults.length - 1; i >= 0; i--) {
@@ -199,7 +201,8 @@ function buildInteractivePlanFromToolResults(toolResults: any[] | undefined): In
       toolName === "user_lookup" &&
       data.found === true &&
       data.patientCount > 1 &&
-      Array.isArray(data.patients)
+      Array.isArray(data.patients) &&
+      !state.activePatientId
     ) {
       const options = data.patients
         .slice(0, 10)
@@ -213,7 +216,12 @@ function buildInteractivePlanFromToolResults(toolResults: any[] | undefined): In
       }
     }
 
-    if (toolName === "search_services" && data.found === true && Array.isArray(data.clinics)) {
+    if (
+      toolName === "search_services" &&
+      data.found === true &&
+      Array.isArray(data.clinics) &&
+      !state.activeClinicId
+    ) {
       const options = data.clinics
         .slice(0, 10)
         .map((c: any) => ({
@@ -226,7 +234,7 @@ function buildInteractivePlanFromToolResults(toolResults: any[] | undefined): In
       }
     }
 
-    if (Array.isArray((data as any).services)) {
+    if (Array.isArray((data as any).services) && !state.activeServiceId) {
       const options = data.services
         .slice(0, 10)
         .map((s: any) => ({
@@ -239,7 +247,12 @@ function buildInteractivePlanFromToolResults(toolResults: any[] | undefined): In
       }
     }
 
-    if (toolName === "select_service" && data.needsMethodSelection === true && Array.isArray(data.methods)) {
+    if (
+      toolName === "select_service" &&
+      data.needsMethodSelection === true &&
+      Array.isArray(data.methods) &&
+      !state.activeMethodId
+    ) {
       const options = data.methods
         .slice(0, 10)
         .map((m: any) => ({
@@ -256,7 +269,8 @@ function buildInteractivePlanFromToolResults(toolResults: any[] | undefined): In
       toolName === "get_clinic_doctors" &&
       data.found === true &&
       !data.autoSelected &&
-      Array.isArray(data.doctors)
+      Array.isArray(data.doctors) &&
+      !state.activeDoctorId
     ) {
       const options = data.doctors
         .slice(0, 10)
@@ -435,9 +449,7 @@ export async function handleMessage(thread: any, message: any) {
 
   await thread.startTyping?.();
 
-  const rawState = await thread.state;
-  console.log(`[BOT] Raw thread.state for ${thread.id}:`, JSON.stringify(rawState));
-  const state: ThreadState = rawState ?? {
+  const state: ThreadState = (await thread.state) ?? {
     phone: extractPhone(thread),
     verified: false,
     verifyAttempts: 0,
@@ -526,44 +538,23 @@ export async function handleMessage(thread: any, message: any) {
     });
 
     if (result.text) {
-      const planFromTools = buildInteractivePlanFromToolResults(lastToolResults);
-      const planFromState = planFromTools ? undefined : buildInteractivePlanFromState(state);
-      const selectionPlan = planFromTools ?? planFromState;
-      console.log("[INTERACTIVE] lastToolResults count:", lastToolResults?.length ?? 0);
-      console.log("[INTERACTIVE] state snapshot:", JSON.stringify({
-        activePatientId: state.activePatientId,
-        activeClinicId: state.activeClinicId,
-        activeServiceId: state.activeServiceId,
-        activeMethodId: state.activeMethodId,
-        activeDoctorId: state.activeDoctorId,
-        patients: state.patients?.length,
-        clinicOptions: state.clinicOptions?.length,
-        serviceOptions: state.serviceOptions?.length,
-        doctorOptions: state.doctorOptions?.length,
-      }));
-      console.log("[INTERACTIVE] planFromTools:", JSON.stringify(planFromTools));
-      console.log("[INTERACTIVE] planFromState:", JSON.stringify(planFromState));
+      const selectionPlan =
+        buildInteractivePlanFromToolResults(lastToolResults, state) ??
+        buildInteractivePlanFromState(state);
       if (selectionPlan) {
-        const phone = extractPhone(thread);
-        console.log("[INTERACTIVE] sending plan to", phone, "options:", selectionPlan.options.length);
-        const sent = await sendInteractivePlan(phone, selectionPlan);
-        console.log("[INTERACTIVE] send result:", sent);
+        const sent = await sendInteractivePlan(extractPhone(thread), selectionPlan);
         if (!sent) {
-          console.log("[INTERACTIVE] falling back to thread.post(text)");
           await thread.post(result.text);
         }
       } else if (shouldSendBookingConfirmButtons(result.text, state)) {
-        console.log("[INTERACTIVE] sending booking confirm buttons");
         const sent = await sendReplyButtons(extractPhone(thread), result.text, [
           { id: "booking_confirm_yes", title: "Yes, confirm" },
           { id: "booking_confirm_no", title: "Change details" },
         ]);
-        console.log("[INTERACTIVE] confirm send result:", sent);
         if (!sent) {
           await thread.post(result.text);
         }
       } else {
-        console.log("[INTERACTIVE] no plan, posting text only");
         await thread.post(result.text);
       }
     } else {
