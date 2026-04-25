@@ -9,7 +9,8 @@
     "lint": "next lint",
     "test:tools": "tsx --tsconfig tsconfig.json scripts/test-tools.ts",
     "test:guards": "tsx --tsconfig tsconfig.json scripts/test-guards.ts",
-    "test:smoke": "tsx --tsconfig tsconfig.json scripts/test-smoke.ts"
+    "test:smoke": "tsx --tsconfig tsconfig.json scripts/test-smoke.ts",
+    "test:interactive": "bun --tsconfig-override tsconfig.json scripts/test-interactive.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.63",
