@@ -2,12 +2,13 @@ import "dotenv/config";
 import { generateText } from "../src/lib/config";
 import { buildSystemPrompt } from "../src/bot/prompt";
 import { createTools } from "../src/bot/tools";
-import type { ThreadState } from "../src/types";
+import type { PatientRef, ThreadState } from "../src/types";
 import { stepCountIs } from "ai";
 import { validateEnv } from "../src/lib/env";
 
 type TurnContext = {
   state: ThreadState;
+  options: CliOptions;
   allToolCalls: string[];
   turnResults: TurnResult[];
   history: Array<{ role: "user" | "assistant"; content: string }>;
@@ -38,6 +39,21 @@ type CliOptions = {
   phone: string;
   fullReply: boolean;
   caseIds: string[];
+  profileName?: string;
+  patientName?: string;
+  patientIndex?: number;
+  documentQuery?: string;
+  documentDateFrom?: string;
+  documentDateTo?: string;
+};
+
+type SmokeProfile = {
+  phone: string;
+  patientName?: string;
+  patientIndex?: number;
+  documentQuery?: string;
+  documentDateFrom?: string;
+  documentDateTo?: string;
 };
 
 type TurnResult = {
@@ -59,8 +75,67 @@ type CaseResult = {
 
 const DEFAULT_PHONE = process.env.SMOKE_PHONE ?? "60123456789";
 
+const SMOKE_PROFILES: Record<string, SmokeProfile> = {
+  "zhang-rong": {
+    phone: "60124850128",
+    patientName: "Zhang Rong",
+    documentQuery: "flu",
+    documentDateFrom: "2026-01-11",
+    documentDateTo: "2026-01-16",
+  },
+};
+
+function normalizeName(input: string): string {
+  return input.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function shouldSelectPatient(ctx: TurnContext): boolean {
+  const patientCount = ctx.state.patients?.length ?? 0;
+  return patientCount > 1 && !ctx.state.activePatientId;
+}
+
+function resolvePreferredPatient(ctx: TurnContext): { index: number; patient: PatientRef } {
+  const patients = ctx.state.patients ?? [];
+  if (patients.length === 0) {
+    throw new Error("Cannot continue flow: no linked patients found in state.");
+  }
+
+  const configuredIndex = ctx.options.patientIndex;
+  if (configuredIndex !== undefined) {
+    if (configuredIndex < 1 || configuredIndex > patients.length) {
+      throw new Error(
+        `Configured --patient-index=${configuredIndex} is out of range (1-${patients.length}).`
+      );
+    }
+    return { index: configuredIndex, patient: patients[configuredIndex - 1] };
+  }
+
+  const configuredName = ctx.options.patientName?.trim();
+  if (configuredName) {
+    const target = normalizeName(configuredName);
+    const matchedIndex = patients.findIndex((p) => normalizeName(p.name) === target);
+    if (matchedIndex >= 0) {
+      return { index: matchedIndex + 1, patient: patients[matchedIndex] };
+    }
+    throw new Error(
+      `Configured --patient-name="${configuredName}" not found. Available: ${patients
+        .map((p) => p.name)
+        .join(", ")}`
+    );
+  }
+
+  if (ctx.state.activePatientId) {
+    const activeIndex = patients.findIndex((p) => p.id === ctx.state.activePatientId);
+    if (activeIndex >= 0) {
+      return { index: activeIndex + 1, patient: patients[activeIndex] };
+    }
+  }
+
+  return { index: 1, patient: patients[0] };
+}
+
 function requirePatientIdentity(ctx: TurnContext): { name: string; ic: string } {
-  const p = ctx.state.patients?.[0];
+  const { patient: p } = resolvePreferredPatient(ctx);
   if (!p || !p.name || !p.ic) {
     throw new Error(
       "Cannot continue verification flow: no patient name/IC in state. Use a phone with at least one linked patient."
@@ -100,6 +175,18 @@ function clinicRequiresDoctorSelection(state: ThreadState): boolean {
 
 function pickTimeFromText(text: string): string | null {
   const normalized = text.replace(/\u00a0/g, " ");
+  const timeRegex = /\b(1[0-2]|0?[1-9]):[0-5][0-9]\s?(AM|PM)\b/gi;
+
+  const bookedTimes = new Set<string>();
+  const bookedAfterTimeRegex = /((?:1[0-2]|0?[1-9]):[0-5][0-9]\s?(?:AM|PM))[^.!?\n]{0,40}already booked/gi;
+  const bookedBeforeTimeRegex = /already booked[^.!?\n]{0,40}((?:1[0-2]|0?[1-9]):[0-5][0-9]\s?(?:AM|PM))/gi;
+  let bookedMatch: RegExpExecArray | null;
+  while ((bookedMatch = bookedAfterTimeRegex.exec(normalized)) !== null) {
+    if (bookedMatch[1]) bookedTimes.add(bookedMatch[1].replace(/\s+/g, " ").trim().toUpperCase());
+  }
+  while ((bookedMatch = bookedBeforeTimeRegex.exec(normalized)) !== null) {
+    if (bookedMatch[1]) bookedTimes.add(bookedMatch[1].replace(/\s+/g, " ").trim().toUpperCase());
+  }
 
   const bulletTimes: string[] = [];
   const bulletRegex = /-\s*((?:1[0-2]|0?[1-9]):[0-5][0-9]\s?(?:AM|PM))/gi;
@@ -110,21 +197,32 @@ function pickTimeFromText(text: string): string | null {
     }
   }
   if (bulletTimes.length > 0) {
-    return bulletTimes[0];
+    const firstUnbooked = bulletTimes.find((t) => !bookedTimes.has(t.toUpperCase()));
+    return firstUnbooked ?? bulletTimes[0];
   }
 
-  const availableSectionIndex = normalized.toLowerCase().indexOf("available time");
+  const availableSectionIndex = normalized.toLowerCase().search(/available\s+(?:time|times|slots?)/i);
   if (availableSectionIndex >= 0) {
     const section = normalized.slice(availableSectionIndex);
-    const fromAvailable = section.match(/\b(1[0-2]|0?[1-9]):[0-5][0-9]\s?(AM|PM)\b/i);
-    if (fromAvailable && fromAvailable[0]) {
-      return fromAvailable[0].replace(/\s+/g, " ").trim();
+    const sectionTimes: string[] = [];
+    let sectionMatch: RegExpExecArray | null;
+    while ((sectionMatch = timeRegex.exec(section)) !== null) {
+      sectionTimes.push(sectionMatch[0].replace(/\s+/g, " ").trim());
+    }
+    if (sectionTimes.length > 0) {
+      const firstUnbooked = sectionTimes.find((t) => !bookedTimes.has(t.toUpperCase()));
+      return firstUnbooked ?? sectionTimes[0];
     }
   }
 
-  const twelveHour = normalized.match(/\b(1[0-2]|0?[1-9]):[0-5][0-9]\s?(AM|PM)\b/i);
-  if (twelveHour && twelveHour[0]) {
-    return twelveHour[0].replace(/\s+/g, " ").trim();
+  const twelveHourTimes: string[] = [];
+  let twelveHourMatch: RegExpExecArray | null;
+  while ((twelveHourMatch = timeRegex.exec(normalized)) !== null) {
+    twelveHourTimes.push(twelveHourMatch[0].replace(/\s+/g, " ").trim());
+  }
+  if (twelveHourTimes.length > 0) {
+    const firstUnbooked = twelveHourTimes.find((t) => !bookedTimes.has(t.toUpperCase()));
+    return firstUnbooked ?? twelveHourTimes[0];
   }
 
   const twentyFour = normalized.match(/\b([01]?[0-9]|2[0-3]):[0-5][0-9]\b/);
@@ -147,154 +245,248 @@ function shouldChooseAlternateTime(ctx: TurnContext): boolean {
   );
 }
 
-const DEFAULT_CASES: SmokeCase[] = [
-  {
-    id: "booking-flow",
-    turns: [
-      {
-        id: "booking-intent",
-        message: "Hi, I want to book a checkup tomorrow at 3pm.",
-        requireAllTools: ["user_lookup", "search_services"],
-      },
-      {
-        id: "choose-clinic",
-        message: (ctx) => {
-          const index = chooseClinicIndexForBooking(ctx.state);
-          return `I choose clinic ${index}.`;
+function buildDocumentIntentMessage(options: CliOptions): string {
+  if (options.documentDateFrom && options.documentDateTo) {
+    return `I need my consultation documents from ${options.documentDateFrom} to ${options.documentDateTo}.`;
+  }
+  return "I need my consultation report from last week.";
+}
+
+function buildDocumentSearchMessage(options: CliOptions): string {
+  const parts: string[] = [];
+  if (options.documentQuery) {
+    parts.push(`diagnosis "${options.documentQuery}"`);
+  }
+  if (options.documentDateFrom && options.documentDateTo) {
+    parts.push(`date range ${options.documentDateFrom} to ${options.documentDateTo}`);
+  }
+  if (parts.length > 0) {
+    return `Please search my consultation reports with ${parts.join(" and ")}.`;
+  }
+  return "Please search my consultation reports from last week.";
+}
+
+function buildCases(options: CliOptions): SmokeCase[] {
+  return [
+    {
+      id: "booking-flow",
+      turns: [
+        {
+          id: "booking-intent",
+          message: "Hi, I want to book a checkup tomorrow at 3pm.",
+          requireAllTools: ["user_lookup"],
         },
-        requireAllTools: ["select_clinic"],
-      },
-      {
-        id: "choose-service",
-        message: "I choose service 1 and method 1 if needed.",
-        requireAllTools: ["select_service"],
-      },
-      {
-        id: "doctor-options",
-        shouldRun: (ctx) => clinicRequiresDoctorSelection(ctx.state) && !ctx.state.activeDoctorId,
-        message: "Please show available doctors.",
-        requireAllTools: ["get_clinic_doctors"],
-      },
-      {
-        id: "choose-doctor",
-        shouldRun: (ctx) =>
-          clinicRequiresDoctorSelection(ctx.state) &&
-          !ctx.state.activeDoctorId &&
-          (ctx.state.doctorOptions?.length ?? 0) > 1,
-        message: "I choose doctor 1.",
-        requireAllTools: ["select_doctor"],
-      },
-      {
-        id: "new-patient-flag",
-        shouldRun: (ctx) => clinicRequiresNewPatientFlag(ctx.state),
-        message: "This booking is for an existing patient.",
-      },
-      {
-        id: "choose-time-slot",
-        shouldRun: shouldChooseAlternateTime,
-        message: (ctx) => {
-          const lastAssistant = [...ctx.history].reverse().find((m) => m.role === "assistant")?.content ?? "";
-          const selectedTime = pickTimeFromText(lastAssistant) ?? "10:00 AM";
-          return `I choose ${selectedTime}.`;
+        {
+          id: "booking-select-patient",
+          shouldRun: shouldSelectPatient,
+          message: (ctx) => {
+            const { index, patient } = resolvePreferredPatient(ctx);
+            return `I choose patient ${index}, ${patient.name}.`;
+          },
         },
-      },
-      {
-        id: "reminder-remark",
-        message: "Reminder remark: please remind me one hour before. Yes, I confirm all details. Please create the booking now.",
-        requireAllTools: ["create_booking"],
-        requireToolArgs: (ctx) =>
-          clinicRequiresNewPatientFlag(ctx.state)
-            ? [
-                {
-                  tool: "create_booking",
-                  arg: "isNewPatient",
-                  expectedType: "boolean",
-                },
-              ]
-            : [],
-      },
-    ],
-  },
-  {
-    id: "view-bookings-flow",
-    turns: [
-      {
-        id: "view-intent",
-        message: "Can you show my upcoming bookings?",
-        requireAllTools: ["user_lookup", "view_bookings"],
-      },
-      {
-        id: "confirm-view",
-        message: "Thanks, got it.",
-      },
-    ],
-  },
-  {
-    id: "reschedule-flow",
-    turns: [
-      {
-        id: "reschedule-intent",
-        message: "I need to reschedule my appointment.",
-        requireAllTools: ["user_lookup", "view_bookings"],
-      },
-      {
-        id: "reschedule-followup",
-        message: "Reschedule booking 1 to next Tuesday at 10:00.",
-        requireAnyTools: ["view_bookings", "reschedule_booking"],
-      },
-    ],
-  },
-  {
-    id: "documents-flow",
-    turns: [
-      {
-        id: "documents-intent",
-        message: "I need my consultation report from last week.",
-        requireAllTools: ["user_lookup"],
-      },
-      {
-        id: "documents-verify",
-        message: (ctx) => {
-          const { name, ic } = requirePatientIdentity(ctx);
-          return `My full name is ${name} and my IC is ${ic}.`;
+        {
+          id: "booking-search-services",
+          shouldRun: (ctx) => !ctx.allToolCalls.includes("search_services"),
+          message: "Please help me book a checkup tomorrow at 3pm.",
+          requireAllTools: ["search_services"],
         },
-        requireAllTools: ["verify_patient"],
-      },
-      {
-        id: "documents-search",
-        message: "Please search my consultation reports from last week.",
-        requireAllTools: ["search_documents"],
-      },
-    ],
-  },
-  {
-    id: "insurance-flow",
-    turns: [
-      {
-        id: "insurance-intent",
-        message: "What does my insurance cover for specialist consultation?",
-        requireAllTools: ["user_lookup"],
-      },
-      {
-        id: "insurance-verify",
-        message: (ctx) => {
-          const { name, ic } = requirePatientIdentity(ctx);
-          return `My full name is ${name} and my IC is ${ic}.`;
+        {
+          id: "choose-clinic",
+          message: (ctx) => {
+            const index = chooseClinicIndexForBooking(ctx.state);
+            return `I choose clinic ${index}.`;
+          },
+          requireAllTools: ["select_clinic"],
         },
-        requireAllTools: ["verify_patient"],
-      },
-      {
-        id: "insurance-query",
-        message: "Now tell me whether specialist consultation is covered.",
-      },
-    ],
-  },
-];
+        {
+          id: "choose-service",
+          message: "I choose service 1 and method 1 if needed.",
+          requireAllTools: ["select_service"],
+        },
+        {
+          id: "doctor-options",
+          shouldRun: (ctx) => clinicRequiresDoctorSelection(ctx.state) && !ctx.state.activeDoctorId,
+          message: "Please show available doctors.",
+          requireAllTools: ["get_clinic_doctors"],
+        },
+        {
+          id: "choose-doctor",
+          shouldRun: (ctx) =>
+            clinicRequiresDoctorSelection(ctx.state) &&
+            !ctx.state.activeDoctorId &&
+            (ctx.state.doctorOptions?.length ?? 0) > 1,
+          message: "I choose doctor 1.",
+          requireAllTools: ["select_doctor"],
+        },
+        {
+          id: "new-patient-flag",
+          shouldRun: (ctx) => clinicRequiresNewPatientFlag(ctx.state),
+          message: "This booking is for an existing patient.",
+        },
+        {
+          id: "choose-time-slot",
+          shouldRun: shouldChooseAlternateTime,
+          message: (ctx) => {
+            const lastAssistant = [...ctx.history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+            const selectedTime = pickTimeFromText(lastAssistant) ?? "10:00 AM";
+            return `I choose ${selectedTime}.`;
+          },
+        },
+        {
+          id: "reminder-remark",
+          message: "Reminder remark: please remind me one hour before. Yes, I confirm all details. Please create the booking now.",
+          requireAllTools: ["create_booking"],
+          requireToolArgs: (ctx) =>
+            clinicRequiresNewPatientFlag(ctx.state)
+              ? [
+                  {
+                    tool: "create_booking",
+                    arg: "isNewPatient",
+                    expectedType: "boolean",
+                  },
+                ]
+              : [],
+        },
+      ],
+    },
+    {
+      id: "view-bookings-flow",
+      turns: [
+        {
+          id: "view-intent",
+          message: "Can you show my upcoming bookings?",
+          requireAllTools: ["user_lookup"],
+        },
+        {
+          id: "view-select-patient",
+          shouldRun: shouldSelectPatient,
+          message: (ctx) => {
+            const { index, patient } = resolvePreferredPatient(ctx);
+            return `I choose patient ${index}, ${patient.name}. Show my bookings.`;
+          },
+        },
+        {
+          id: "view-bookings",
+          shouldRun: (ctx) => !ctx.allToolCalls.includes("view_bookings"),
+          message: "Please show my upcoming bookings now.",
+          requireAllTools: ["view_bookings"],
+        },
+        {
+          id: "confirm-view",
+          message: "Thanks, got it.",
+        },
+      ],
+    },
+    {
+      id: "reschedule-flow",
+      turns: [
+        {
+          id: "reschedule-intent",
+          message: "I need to reschedule my appointment.",
+          requireAllTools: ["user_lookup"],
+        },
+        {
+          id: "reschedule-select-patient",
+          shouldRun: shouldSelectPatient,
+          message: (ctx) => {
+            const { index, patient } = resolvePreferredPatient(ctx);
+            return `I choose patient ${index}, ${patient.name}.`;
+          },
+        },
+        {
+          id: "reschedule-view",
+          shouldRun: (ctx) => !ctx.allToolCalls.includes("view_bookings"),
+          message: "Please show my upcoming bookings first.",
+          requireAllTools: ["view_bookings"],
+        },
+        {
+          id: "reschedule-followup",
+          message: "Reschedule booking 1 to next Tuesday at 10:00.",
+          requireAnyTools: ["view_bookings", "reschedule_booking"],
+        },
+      ],
+    },
+    {
+      id: "documents-flow",
+      turns: [
+        {
+          id: "documents-intent",
+          message: buildDocumentIntentMessage(options),
+          requireAllTools: ["user_lookup"],
+        },
+        {
+          id: "documents-select-patient",
+          shouldRun: shouldSelectPatient,
+          message: (ctx) => {
+            const { index, patient } = resolvePreferredPatient(ctx);
+            return `I choose patient ${index}, ${patient.name}.`;
+          },
+        },
+        {
+          id: "documents-verify",
+          message: (ctx) => {
+            const { name, ic } = requirePatientIdentity(ctx);
+            return `My full name is ${name} and my IC is ${ic}.`;
+          },
+          requireAllTools: ["verify_patient"],
+        },
+        {
+          id: "documents-search",
+          shouldRun: (ctx) => !ctx.allToolCalls.includes("search_documents"),
+          message: buildDocumentSearchMessage(options),
+          requireAllTools: ["search_documents"],
+        },
+      ],
+    },
+    {
+      id: "insurance-flow",
+      turns: [
+        {
+          id: "insurance-intent",
+          message: "What does my insurance cover for specialist consultation?",
+          requireAllTools: ["user_lookup"],
+        },
+        {
+          id: "insurance-select-patient",
+          shouldRun: shouldSelectPatient,
+          message: (ctx) => {
+            const { index, patient } = resolvePreferredPatient(ctx);
+            return `I choose patient ${index}, ${patient.name}.`;
+          },
+        },
+        {
+          id: "insurance-verify",
+          message: (ctx) => {
+            const { name, ic } = requirePatientIdentity(ctx);
+            return `My full name is ${name} and my IC is ${ic}.`;
+          },
+          requireAllTools: ["verify_patient"],
+        },
+        {
+          id: "insurance-query",
+          message: "Now tell me whether specialist consultation is covered.",
+        },
+      ],
+    },
+  ];
+}
 
 function parseCliArgs(): CliOptions {
   const args = process.argv.slice(2);
   let phone = DEFAULT_PHONE;
   let fullReply = false;
+  let profileName = process.env.SMOKE_PROFILE?.trim() || undefined;
+  let patientName = process.env.SMOKE_PATIENT_NAME?.trim() || undefined;
+  let patientIndex = process.env.SMOKE_PATIENT_INDEX ? Number(process.env.SMOKE_PATIENT_INDEX) : undefined;
+  let documentQuery = process.env.SMOKE_DOC_QUERY?.trim() || undefined;
+  let documentDateFrom = process.env.SMOKE_DOC_DATE_FROM?.trim() || undefined;
+  let documentDateTo = process.env.SMOKE_DOC_DATE_TO?.trim() || undefined;
+  let phoneExplicitlySet = false;
+  let patientNameExplicitlySet = false;
+  let patientIndexExplicitlySet = false;
+  let documentQueryExplicitlySet = false;
+  let documentDateFromExplicitlySet = false;
+  let documentDateToExplicitlySet = false;
   const caseIds: string[] = [];
 
   for (const arg of args) {
@@ -317,14 +509,89 @@ function parseCliArgs(): CliOptions {
     }
     if (arg.startsWith("--phone=")) {
       phone = arg.slice("--phone=".length).trim() || phone;
+      phoneExplicitlySet = true;
+      continue;
+    }
+    if (arg.startsWith("--profile=")) {
+      const value = arg.slice("--profile=".length).trim();
+      profileName = value || undefined;
+      continue;
+    }
+    if (arg.startsWith("--patient-name=")) {
+      const value = arg.slice("--patient-name=".length).trim();
+      patientName = value || undefined;
+      patientNameExplicitlySet = true;
+      continue;
+    }
+    if (arg.startsWith("--patient-index=")) {
+      const raw = arg.slice("--patient-index=".length).trim();
+      if (!raw) {
+        patientIndex = undefined;
+      } else {
+        const parsed = Number(raw);
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          throw new Error(`Invalid --patient-index value "${raw}". Must be a positive integer.`);
+        }
+        patientIndex = parsed;
+      }
+      patientIndexExplicitlySet = true;
+      continue;
+    }
+    if (arg.startsWith("--doc-query=")) {
+      const value = arg.slice("--doc-query=".length).trim();
+      documentQuery = value || undefined;
+      documentQueryExplicitlySet = true;
+      continue;
+    }
+    if (arg.startsWith("--doc-date-from=")) {
+      const value = arg.slice("--doc-date-from=".length).trim();
+      documentDateFrom = value || undefined;
+      documentDateFromExplicitlySet = true;
+      continue;
+    }
+    if (arg.startsWith("--doc-date-to=")) {
+      const value = arg.slice("--doc-date-to=".length).trim();
+      documentDateTo = value || undefined;
+      documentDateToExplicitlySet = true;
       continue;
     }
     if (!arg.startsWith("--")) {
       phone = arg.trim() || phone;
+      phoneExplicitlySet = true;
     }
   }
 
-  return { phone, fullReply, caseIds };
+  const profile = profileName ? SMOKE_PROFILES[profileName] : undefined;
+  if (profileName && !profile) {
+    throw new Error(
+      `Unknown profile "${profileName}". Available profiles: ${Object.keys(SMOKE_PROFILES).join(", ")}`
+    );
+  }
+
+  if (profile) {
+    if (!phoneExplicitlySet) phone = profile.phone;
+    if (!patientNameExplicitlySet && profile.patientName) patientName = profile.patientName;
+    if (!patientIndexExplicitlySet && profile.patientIndex !== undefined) patientIndex = profile.patientIndex;
+    if (!documentQueryExplicitlySet && profile.documentQuery) documentQuery = profile.documentQuery;
+    if (!documentDateFromExplicitlySet && profile.documentDateFrom) documentDateFrom = profile.documentDateFrom;
+    if (!documentDateToExplicitlySet && profile.documentDateTo) documentDateTo = profile.documentDateTo;
+  }
+
+  if (patientName && patientIndex !== undefined) {
+    throw new Error("Use either --patient-name or --patient-index, not both.");
+  }
+
+  return {
+    phone,
+    fullReply,
+    caseIds,
+    profileName,
+    patientName,
+    patientIndex,
+    documentQuery,
+    documentDateFrom,
+    documentDateTo,
+  };
 }
 
 function parseToolArgs(raw: unknown): Record<string, unknown> {
@@ -419,6 +686,7 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
   for (const turn of testCase.turns) {
     const ctx: TurnContext = {
       state,
+      options,
       allToolCalls: [...allToolCalls],
       turnResults: [...turns],
       history: [...history],
@@ -514,25 +782,45 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
 async function main() {
   validateEnv();
   const options = parseCliArgs();
+  const allCases = buildCases(options);
   const selectedCases =
     options.caseIds.length > 0
-      ? DEFAULT_CASES.filter((c) => options.caseIds.includes(c.id))
-      : DEFAULT_CASES;
+      ? allCases.filter((c) => options.caseIds.includes(c.id))
+      : allCases;
 
   if (options.caseIds.length > 0 && selectedCases.length === 0) {
     console.error(`No matching case found for: ${options.caseIds.join(", ")}`);
-    console.error(`Available cases: ${DEFAULT_CASES.map((c) => c.id).join(", ")}`);
+    console.error(`Available cases: ${allCases.map((c) => c.id).join(", ")}`);
     process.exit(1);
   }
 
-  const unknownCaseIds = options.caseIds.filter((id) => !DEFAULT_CASES.some((c) => c.id === id));
+  const unknownCaseIds = options.caseIds.filter((id) => !allCases.some((c) => c.id === id));
   if (unknownCaseIds.length > 0) {
     console.error(`Unknown case id(s): ${unknownCaseIds.join(", ")}`);
-    console.error(`Available cases: ${DEFAULT_CASES.map((c) => c.id).join(", ")}`);
+    console.error(`Available cases: ${allCases.map((c) => c.id).join(", ")}`);
     process.exit(1);
   }
 
   console.log(`Running multi-turn smoke suite with phone: ${options.phone}`);
+  if (options.profileName) {
+    console.log(`Profile: ${options.profileName}`);
+  }
+  if (options.patientName) {
+    console.log(`Preferred patient: ${options.patientName}`);
+  } else if (options.patientIndex !== undefined) {
+    console.log(`Preferred patient index: ${options.patientIndex}`);
+  }
+  if (options.documentQuery || (options.documentDateFrom && options.documentDateTo)) {
+    const filters = [
+      options.documentQuery ? `query=${options.documentQuery}` : null,
+      options.documentDateFrom && options.documentDateTo
+        ? `date=${options.documentDateFrom}..${options.documentDateTo}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+    console.log(`Document filters: ${filters}`);
+  }
   console.log(`Full replies: ${options.fullReply ? "ON" : "OFF"}`);
   console.log(`Cases: ${selectedCases.map((c) => c.id).join(", ")}`);
   console.log("");

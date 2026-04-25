@@ -1,6 +1,6 @@
 # AnyHealth Bot Automated Testing
 
-Generated on: 2026-04-16
+Generated on: 2026-04-17
 
 ## What You Can Run Now
 
@@ -20,10 +20,21 @@ Optional:
 
 ```bash
 pnpm test:smoke -- --phone=60123456789
+pnpm test:smoke -- --profile=zhang-rong
+pnpm test:smoke -- --phone=60124850128 --patient-name="Zhang Rong"
+pnpm test:smoke -- --phone=60124850128 --patient-name="Zhang Rong" --doc-query=flu --doc-date-from=2026-01-11 --doc-date-to=2026-01-16
 pnpm test:smoke -- --full-reply
 pnpm test:smoke -- --case=booking-flow
 pnpm test:smoke -- --cases=booking-flow,reschedule-flow
 ```
+
+`test:smoke` also supports:
+
+- `--profile=<name>` (built-in: `zhang-rong`)
+- `--patient-name="<full name>"` or `--patient-index=<n>`
+- `--doc-query=<keyword>`
+- `--doc-date-from=YYYY-MM-DD`
+- `--doc-date-to=YYYY-MM-DD`
 
 3. Single-message end-to-end tool-orchestration check:
 
@@ -48,7 +59,7 @@ pnpm build
 ## What `test:smoke` Covers
 
 - Runs predefined multi-turn conversation flows:
-  - booking flow (intent -> clinic selection -> service selection -> patient type -> booking create)
+  - booking flow (intent -> patient disambiguation when needed -> clinic selection -> service selection -> patient type -> booking create)
   - view bookings flow
   - reschedule flow
   - document retrieval flow (including verification)
