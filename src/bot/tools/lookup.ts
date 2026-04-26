@@ -306,7 +306,16 @@ export function createLookupTools(
           };
         });
 
-        await updateState({ clinicOptions, lastSearchQuery: query });
+        await updateState({
+          clinicOptions,
+          lastSearchQuery: query,
+          activeClinicId: undefined,
+          activeServiceId: undefined,
+          activeMethodId: undefined,
+          activeDoctorId: undefined,
+          serviceOptions: undefined,
+          doctorOptions: undefined,
+        });
 
         // Auto-select if only one clinic
         if (clinicOptions.length === 1) {
@@ -347,10 +356,18 @@ export function createLookupTools(
         }
 
         const clinic = options[index - 1];
+        const clinicChanged = state.activeClinicId !== clinic.clinicId;
         await updateState({
           activeClinicId: clinic.clinicId,
-          activeDoctorId: undefined,
-          doctorOptions: undefined,
+          ...(clinicChanged
+            ? {
+                activeServiceId: undefined,
+                activeMethodId: undefined,
+                activeDoctorId: undefined,
+                serviceOptions: undefined,
+                doctorOptions: undefined,
+              }
+            : {}),
         });
 
         const query = state.lastSearchQuery ?? "";

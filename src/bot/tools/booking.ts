@@ -268,10 +268,13 @@ export function createBookingTools(
         ]);
 
         // Clear booking selections to prevent duplicate bookings in the same turn
+        // and to allow a fresh search if the user starts a new booking flow
         await updateState({
+          activeClinicId: undefined,
           activeServiceId: undefined,
           activeMethodId: undefined,
           activeDoctorId: undefined,
+          clinicOptions: undefined,
           serviceOptions: undefined,
           doctorOptions: undefined,
         });
