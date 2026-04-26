@@ -1,5 +1,6 @@
 import { generateText as aiGenerateText, type LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
+import { vertex } from "@ai-sdk/google-vertex";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 
@@ -13,6 +14,8 @@ export function createModel(modelStr: string): LanguageModel {
   switch (provider) {
     case "google":
       return google(modelId);
+    case "vertex":
+      return vertex(modelId);
     case "anthropic":
       return anthropic(modelId);
     case "openai":
@@ -69,6 +72,11 @@ export function getFallbackModels(): LanguageModel[] {
   // Add Google AI Studio fallback if configured
   if (process.env.AI_GOOGLE_FALLBACK_MODEL) {
     models.push(createModel(`google/${process.env.AI_GOOGLE_FALLBACK_MODEL}`));
+  }
+
+  // Add Google Vertex AI fallback if configured (uses ADC)
+  if (process.env.AI_VERTEX_FALLBACK_MODEL) {
+    models.push(createModel(`vertex/${process.env.AI_VERTEX_FALLBACK_MODEL}`));
   }
 
   // Add OpenRouter fallback if configured

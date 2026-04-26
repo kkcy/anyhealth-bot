@@ -15,6 +15,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.63",
     "@ai-sdk/google": "^3.0.52",
+    "@ai-sdk/google-vertex": "^4.0.112",
     "@ai-sdk/openai": "^3.0.47",
     "@chat-adapter/state-pg": "^4.20.2",
     "@chat-adapter/whatsapp": "^4.20.2",
