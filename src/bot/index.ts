@@ -152,37 +152,39 @@ function extractInteractiveReplyId(message: any): string | undefined {
   );
 }
 
-function mapInteractiveReplyToText(replyId: string | undefined): string | undefined {
+function mapInteractiveReplyToText(
+  replyId: string | undefined,
+  state?: ThreadState
+): string | undefined {
   if (!replyId) return undefined;
 
   if (replyId === "booking_confirm_yes") {
-    return "Yes, I confirm all booking details. Please create the booking now.";
+    return "Yes, I confirm the booking. Please call create_booking now.";
   }
   if (replyId === "booking_confirm_no") {
     return "I want to change my booking details.";
   }
-  if (replyId.startsWith("patient_select_")) {
-    const index = Number(replyId.replace("patient_select_", ""));
-    if (Number.isInteger(index) && index > 0) return `I choose patient ${index}.`;
-  }
-  if (replyId.startsWith("clinic_select_")) {
-    const index = Number(replyId.replace("clinic_select_", ""));
-    if (Number.isInteger(index) && index > 0) return `I choose clinic ${index}.`;
-  }
-  if (replyId.startsWith("service_select_")) {
-    const index = Number(replyId.replace("service_select_", ""));
-    if (Number.isInteger(index) && index > 0) return `I choose service ${index}.`;
-  }
-  if (replyId.startsWith("method_select_")) {
-    const index = Number(replyId.replace("method_select_", ""));
-    if (Number.isInteger(index) && index > 0) return `I choose method ${index}.`;
-  }
-  if (replyId.startsWith("doctor_select_")) {
-    const index = Number(replyId.replace("doctor_select_", ""));
-    if (Number.isInteger(index) && index > 0) return `I choose doctor ${index}.`;
-  }
 
-  return undefined;
+  const namedPick = (
+    prefix: string,
+    label: string,
+    tool: string,
+    name?: string
+  ): string | undefined => {
+    if (!replyId.startsWith(prefix)) return undefined;
+    const index = Number(replyId.replace(prefix, ""));
+    if (!Number.isInteger(index) || index <= 0) return undefined;
+    const tail = name ? ` (${name})` : "";
+    return `I pick ${label} ${index}${tail} from the ${label} list. Call ${tool} with index ${index}.`;
+  };
+
+  return (
+    namedPick("patient_select_", "patient", "select_patient", state?.patients?.[Number(replyId.replace("patient_select_", "")) - 1]?.name) ??
+    namedPick("clinic_select_", "clinic", "select_clinic", state?.clinicOptions?.[Number(replyId.replace("clinic_select_", "")) - 1]?.clinicName) ??
+    namedPick("service_select_", "service", "select_service", state?.serviceOptions?.[Number(replyId.replace("service_select_", "")) - 1]?.serviceName) ??
+    namedPick("method_select_", "method", "select_service") ??
+    namedPick("doctor_select_", "doctor", "select_doctor", state?.doctorOptions?.[Number(replyId.replace("doctor_select_", "")) - 1]?.name)
+  );
 }
 
 function buildInteractivePlanFromToolResults(
@@ -332,8 +334,41 @@ function buildInteractivePlanFromState(state: ThreadState): InteractivePlan | un
   return undefined;
 }
 
-async function sendInteractivePlan(phone: string, plan: InteractivePlan): Promise<boolean> {
-  const body = clip(plan.body, 900);
+function stripNumberedList(text: string): string {
+  // Drop lines that look like the LLM enumerated the same options the
+  // interactive list will already display ("1. Foo", "2) Bar", "- Baz"),
+  // and drop the "reply with the number" instruction since the list
+  // already provides tappable buttons.
+  const lines = text.split(/\r?\n/);
+  const kept: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      kept.push(line);
+      continue;
+    }
+    if (/^(\d+[.)]\s|[-•*]\s)/.test(trimmed)) continue;
+
+    // Strip sentences asking the user to reply with a number / index /
+    // option. Match "reply with N", "please pick a number", "tap option",
+    // "select 1 or 2", "respond with the number", "type the number", etc.
+    const cleaned = trimmed.replace(
+      /\(?\s*(please\s+)?(reply|respond|type|enter|send|tap|pick|choose|select|provide|share|tell|let me know)[^.?!]*\b(number|index|option|digit|1\s*or\s*2|1\/2|the (clinic|service|method|doctor|patient))[^.?!]*[.?!]?\s*\)?/gi,
+      ""
+    ).trim();
+
+    if (cleaned) kept.push(cleaned);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+async function sendInteractivePlan(
+  phone: string,
+  plan: InteractivePlan,
+  bodyOverride?: string
+): Promise<boolean> {
+  const rawBody = bodyOverride?.trim() ? stripNumberedList(bodyOverride) : plan.body;
+  const body = clip(rawBody || plan.body, 900);
   return sendListMessage(phone, body, "Choose option", [
     {
       title: "Options",
@@ -475,8 +510,6 @@ export async function handleMessage(thread: any, message: any) {
   }
 
   const tools = createTools(state, updateState);
-  const systemPrompt = buildSystemPrompt(state);
-
   const sessionGapMs =
     Number(process.env.SESSION_GAP_HOURS || "2") * 60 * 60 * 1000;
 
@@ -496,6 +529,40 @@ export async function handleMessage(thread: any, message: any) {
     }
   }
 
+  const incomingText: string = String(message?.text?.body ?? message?.text ?? "");
+  const isInteractiveClick = !!extractInteractiveReplyId(message);
+  const looksLikeNewBookingIntent =
+    !isInteractiveClick &&
+    /\b(book|booking|appointment|schedule|checkup|consult)\b/i.test(incomingText);
+  const sessionBoundaryHit = sessionStart > 0;
+
+  // Clear stale booking selections when:
+  //  - a new session starts (long idle gap), OR
+  //  - the user explicitly starts a new booking intent via typed text.
+  // Do NOT clear on interactive button clicks — those are continuations
+  // of an in-flight flow.
+  if (
+    !isInteractiveClick &&
+    (sessionBoundaryHit || looksLikeNewBookingIntent) &&
+    (state.activeClinicId || state.activeServiceId)
+  ) {
+    console.log(
+      `[BOT] Clearing stale active selections (sessionBoundary=${sessionBoundaryHit} newBookingIntent=${looksLikeNewBookingIntent})`
+    );
+    await updateState({
+      activeClinicId: undefined,
+      activeServiceId: undefined,
+      activeMethodId: undefined,
+      activeDoctorId: undefined,
+      clinicOptions: undefined,
+      serviceOptions: undefined,
+      doctorOptions: undefined,
+      lastSearchQuery: undefined,
+    });
+  }
+
+  const systemPrompt = buildSystemPrompt(state);
+
   // Cap session messages to prevent token overflow
   const MAX_SESSION_MESSAGES = 50;
   const sessionMessages = allMessages.slice(sessionStart);
@@ -503,7 +570,10 @@ export async function handleMessage(thread: any, message: any) {
     ? sessionMessages.slice(-MAX_SESSION_MESSAGES)
     : sessionMessages;
   const history = await toAiMessages(messages);
-  const normalizedButtonReply = mapInteractiveReplyToText(extractInteractiveReplyId(message));
+  const normalizedButtonReply = mapInteractiveReplyToText(
+    extractInteractiveReplyId(message),
+    state
+  );
   if (normalizedButtonReply) {
     const lastMessage = (history as any[])[history.length - 1];
     const lastContent = typeof lastMessage?.content === "string" ? lastMessage.content : "";
@@ -553,7 +623,7 @@ export async function handleMessage(thread: any, message: any) {
           `planTools=${planFromTools ? planFromTools.body : "-"} planState=${planFromState ? planFromState.body : "-"}`
       );
       if (selectionPlan) {
-        const sent = await sendInteractivePlan(extractPhone(thread), selectionPlan);
+        const sent = await sendInteractivePlan(extractPhone(thread), selectionPlan, result.text);
         console.log(`[INTERACTIVE] sent list "${selectionPlan.body}" success=${sent}`);
         if (!sent) {
           await thread.post(result.text);
