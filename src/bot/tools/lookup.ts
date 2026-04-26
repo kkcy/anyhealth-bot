@@ -241,6 +241,24 @@ export function createLookupTools(
         query: z.string().describe("Service name, description, or category to search for"),
       }),
       execute: async ({ query }) => {
+        // Defensive guard: if a booking flow is already in progress
+        // (clinic + service selected) and the LLM redundantly re-issues
+        // search_services, refuse to wipe state and remind the LLM that
+        // a selection is already active.
+        if (state.activeClinicId && state.activeServiceId) {
+          const activeClinic = (state.clinicOptions ?? []).find(
+            (c) => c.clinicId === state.activeClinicId
+          );
+          return JSON.stringify({
+            alreadyInProgress: true,
+            activeClinic: activeClinic?.clinicName ?? null,
+            instruction:
+              "A clinic and service are already selected for this booking. Do not start a new search. " +
+              "If the user just said yes/confirm, call create_booking instead. " +
+              "Only call search_services again if the user explicitly asks for a different clinic or service.",
+          });
+        }
+
         const words = query
           .toLowerCase()
           .split(/\s+/)

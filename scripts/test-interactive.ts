@@ -228,6 +228,99 @@ const CASES: CaseSpec[] = [
       }
     },
   },
+  {
+    id: "confirm-with-text-yes",
+    phone: process.env.SMOKE_PHONE ?? "60174421238",
+    async run(thread, ctx) {
+      const targetDate = (() => {
+        const d = new Date();
+        const day = d.getDay();
+        const diff = ((3 - day + 7) % 7) || 7;
+        d.setDate(d.getDate() + diff);
+        return d.toISOString().slice(0, 10);
+      })();
+
+      const triedTimes = new Set<string>();
+      const initialTime = "8:00 AM";
+      triedTimes.add(initialTime.toUpperCase());
+
+      let last = await ctx.step("ask to book", async () => {
+        await deliverUserText(
+          thread,
+          `I want to book a checkup at any clinic on ${targetDate} at ${initialTime}.`
+        );
+      });
+
+      let safety = 20;
+      let confirmedWithText = false;
+      while (safety-- > 0) {
+        const list = last.captured.find((c) => c.kind === "list");
+        const buttons = last.captured.find((c) => c.kind === "buttons");
+
+        if (buttons) {
+          // Critical step: type "yes" as text instead of clicking button
+          confirmedWithText = true;
+          last = await ctx.step('type "yes" instead of clicking button', async () => {
+            await deliverUserText(thread, "yes");
+          });
+          continue;
+        }
+
+        if (list) {
+          const pick =
+            list.options.find((o) => /clinic_select_/i.test(o.id))?.id ??
+            list.options.find((o) => /service_select_/i.test(o.id))?.id ??
+            list.options.find((o) => /method_select_/i.test(o.id))?.id ??
+            list.options.find((o) => /doctor_select_/i.test(o.id))?.id ??
+            list.options[0]?.id;
+          last = await ctx.step(`click "${pick}" from "${list.body}"`, async () => {
+            if (pick) await deliverInteractiveReply(thread, pick);
+          });
+          continue;
+        }
+
+        const lastText = last.posted.join("\n");
+        if (/created|booking id|successfully/i.test(lastText)) break;
+
+        const askingDifferentTime = /already booked|fully booked|alternative time|different time/i.test(
+          lastText
+        );
+        if (askingDifferentTime) {
+          const altTime = pickTimeFromAssistantText(lastText, triedTimes);
+          if (altTime) {
+            triedTimes.add(altTime);
+            last = await ctx.step(`switch time to "${altTime}"`, async () => {
+              await deliverUserText(thread, `Use ${altTime} instead.`);
+            });
+            continue;
+          }
+        }
+
+        last = await ctx.step("neutral nudge", async () => {
+          await deliverUserText(thread, "OK go ahead.");
+        });
+      }
+
+      ctx.expect(safety > 0, "exceeded turn budget without finishing booking");
+      ctx.expect(confirmedWithText, "expected to reach buttons step and confirm via text 'yes'");
+      ctx.expect(
+        thread.posted.some((p) => /created|booking id|successfully/i.test(p)),
+        "expected booking to be created after typing 'yes'"
+      );
+
+      const stepWhereTextYesSent = ctx.steps.findIndex((s) =>
+        /type "yes"/i.test(s.label)
+      );
+      const stepsAfterTextYes = ctx.steps.slice(stepWhereTextYesSent + 1);
+      const reAskedClinic = stepsAfterTextYes.some((s) =>
+        s.captured.some((c) => c.kind === "list" && /choose a clinic/i.test(c.body))
+      );
+      ctx.expect(
+        !reAskedClinic,
+        "after typing 'yes', bot should NOT re-ask clinic — it should call create_booking"
+      );
+    },
+  },
 ];
 
 function expectFn(failures: string[]) {

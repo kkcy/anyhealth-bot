@@ -445,6 +445,7 @@ export async function deliverInteractiveReply(
 }
 
 export async function handleMessage(thread: any, message: any) {
+  console.log("[BOT] handleMessage build-marker=v2-2026-04-26");
   console.log(`[BOT] Incoming message from ${thread.id}:`, JSON.stringify(message, null, 2));
 
   await thread.startTyping?.();
@@ -538,11 +539,22 @@ export async function handleMessage(thread: any, message: any) {
     });
 
     if (result.text) {
-      const selectionPlan =
-        buildInteractivePlanFromToolResults(lastToolResults, state) ??
-        buildInteractivePlanFromState(state);
+      const planFromTools = buildInteractivePlanFromToolResults(lastToolResults, state);
+      const planFromState = planFromTools ? undefined : buildInteractivePlanFromState(state);
+      const selectionPlan = planFromTools ?? planFromState;
+      const lastToolName = lastToolResults?.length
+        ? String(
+            (lastToolResults[lastToolResults.length - 1] as any)?.toolName ?? "?"
+          )
+        : "(none)";
+      console.log(
+        `[INTERACTIVE] decide tools=${lastToolResults?.length ?? 0} lastTool=${lastToolName} ` +
+          `state{cli=${!!state.activeClinicId} svc=${!!state.activeServiceId} mtd=${!!state.activeMethodId} doc=${!!state.activeDoctorId} pat=${!!state.activePatientId} | clinicOpts=${state.clinicOptions?.length ?? 0} svcOpts=${state.serviceOptions?.length ?? 0}} ` +
+          `planTools=${planFromTools ? planFromTools.body : "-"} planState=${planFromState ? planFromState.body : "-"}`
+      );
       if (selectionPlan) {
         const sent = await sendInteractivePlan(extractPhone(thread), selectionPlan);
+        console.log(`[INTERACTIVE] sent list "${selectionPlan.body}" success=${sent}`);
         if (!sent) {
           await thread.post(result.text);
         }
