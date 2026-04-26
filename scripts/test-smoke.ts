@@ -737,7 +737,7 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
     }
 
     const result = await generateText({
-      system: buildSystemPrompt(),
+      system: buildSystemPrompt(state),
       tools,
       stopWhen: stepCountIs(12),
       messages: [...history, { role: "user", content: message }],

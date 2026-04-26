@@ -475,7 +475,7 @@ export async function handleMessage(thread: any, message: any) {
   }
 
   const tools = createTools(state, updateState);
-  const systemPrompt = buildSystemPrompt();
+  const systemPrompt = buildSystemPrompt(state);
 
   const sessionGapMs =
     Number(process.env.SESSION_GAP_HOURS || "2") * 60 * 60 * 1000;

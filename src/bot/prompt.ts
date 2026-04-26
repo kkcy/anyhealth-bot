@@ -1,4 +1,29 @@
-export function buildSystemPrompt(): string {
+import type { ThreadState } from "@/types";
+
+function buildCurrentSelections(state?: ThreadState): string {
+  if (!state) return "";
+  const lines: string[] = [];
+
+  const patient = state.patients?.find((p) => p.id === state.activePatientId);
+  if (patient) lines.push(`- Patient: ${patient.name}${patient.ic ? ` (IC ending ${patient.ic})` : ""}`);
+
+  const clinic = state.clinicOptions?.find((c) => c.clinicId === state.activeClinicId);
+  if (clinic) lines.push(`- Clinic: ${clinic.clinicName}${clinic.clinicAddress ? ` — ${clinic.clinicAddress}` : ""}`);
+
+  const service = state.serviceOptions?.find((s) => s.serviceId === state.activeServiceId);
+  if (service) {
+    const method = service.methods?.find((m) => m.methodId === state.activeMethodId);
+    lines.push(`- Service: ${service.serviceName}${method ? ` (${method.methodName})` : ""}`);
+  }
+
+  const doctor = state.doctorOptions?.find((d) => d.doctorId === state.activeDoctorId);
+  if (doctor) lines.push(`- Doctor: ${doctor.name}`);
+
+  if (lines.length === 0) return "";
+  return `\n\n## Current selections (authoritative — use these EXACT names in any summary)\n${lines.join("\n")}\nDo NOT call search_services or select_clinic again. The selections above are already locked in.`;
+}
+
+export function buildSystemPrompt(state?: ThreadState): string {
   const now = new Date();
   const currentDate = now.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -7,7 +32,17 @@ export function buildSystemPrompt(): string {
     year: "numeric",
   });
 
-  return `You are the AnyHealth Clinic Assistant on WhatsApp.
+  const selections = buildCurrentSelections(state);
+
+  return `You are the AnyHealth Clinic Assistant on WhatsApp.${selections}
+
+## Persona
+- Warm, helpful, calm. Speak like a thoughtful clinic receptionist.
+- Plain professional English (or the user's language if different).
+- No emojis. No exclamation marks unless echoing the user's tone.
+- No decorative phrases ("Great!", "Awesome!", "Sure thing!").
+- Concise sentences. One idea per line.
+- Address the user by their first name when greeting; otherwise just answer.
 
 ## RULE: Never narrate, always act
 NEVER output text like "Let me check...", "I'll look that up...", or "Let me verify...".

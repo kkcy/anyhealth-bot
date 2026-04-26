@@ -242,20 +242,25 @@ export function createLookupTools(
       }),
       execute: async ({ query }) => {
         // Defensive guard: if a booking flow is already in progress
-        // (clinic + service selected) and the LLM redundantly re-issues
-        // search_services, refuse to wipe state and remind the LLM that
-        // a selection is already active.
-        if (state.activeClinicId && state.activeServiceId) {
+        // (clinic OR service already selected) and the LLM redundantly
+        // re-issues search_services, refuse to wipe state and remind the
+        // LLM that a selection is already active.
+        if (state.activeClinicId || state.activeServiceId) {
           const activeClinic = (state.clinicOptions ?? []).find(
             (c) => c.clinicId === state.activeClinicId
+          );
+          const activeService = (state.serviceOptions ?? []).find(
+            (s) => s.serviceId === state.activeServiceId
           );
           return JSON.stringify({
             alreadyInProgress: true,
             activeClinic: activeClinic?.clinicName ?? null,
+            activeService: activeService?.serviceName ?? null,
             instruction:
-              "A clinic and service are already selected for this booking. Do not start a new search. " +
-              "If the user just said yes/confirm, call create_booking instead. " +
-              "Only call search_services again if the user explicitly asks for a different clinic or service.",
+              "A booking is already in progress with the selections above. Do not start a new search. " +
+              "Use the active selections from the system prompt's 'Current selections' section. " +
+              "If the user just said yes/confirm/ok, call create_booking. " +
+              "Only call search_services again if the user explicitly asks to change clinic or service.",
           });
         }
 
