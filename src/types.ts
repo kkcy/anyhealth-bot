@@ -64,4 +64,7 @@ export interface ThreadState {
     lng: number;
     capturedAt: number;
   };
+
+  // Deep-link routing — one-shot, cleared at end of turn.
+  unknownSlugThisTurn?: boolean;
 }
