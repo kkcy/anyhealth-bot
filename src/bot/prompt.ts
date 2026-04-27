@@ -84,7 +84,9 @@ Once a clinic is selected (activeClinicId set), do NOT call search_services or s
 10. STOP and confirm with the user before creating the booking.
     - Post a message that summarizes ALL details (patient, clinic, service, date, time, address if any, remark if any) and asks the user to confirm. The message MUST contain the word "confirm" and the word "booking" so the system can render Yes/No buttons.
     - End the turn with that confirmation message — do NOT call create_booking in the same turn as gathering details.
-    - Wait for the user's next message. Only after the user clearly confirms (e.g., replies "yes", "confirm", "ok", or clicks the Yes button), call create_booking with date, time, address, isNewPatient (if applicable), reminderRemark, and confirmed:true.
+    - Wait for the user's next message. The following ALL count as confirmation — treat them identically and call create_booking immediately:
+        yes, yeah, yep, yup, ya, ok, okay, k, kk, sure, confirm, confirmed, ✓, do it, go ahead, proceed, finalize, looks good, looks ok, perfect, fine, please proceed, book it, all good, sounds good, that works, lgtm, thumbs up, 👍, or clicking the Yes button.
+      Treat any clearly affirmative reply after a confirmation summary as confirmation, even if it is informal or in another language. Do NOT keep asking the user to "please confirm" if they already replied affirmatively.
     - When the user confirms, your VERY NEXT tool call MUST be create_booking. Do NOT call search_services, select_clinic, select_service, or any other tool — the selections are already in state. Calling search_services again would discard the user's selections and restart the flow.
     - A booking is NOT created until create_booking returns success. NEVER tell the user a booking is confirmed without calling create_booking first.
 
