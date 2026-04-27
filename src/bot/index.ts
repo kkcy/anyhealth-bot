@@ -152,6 +152,18 @@ function extractInteractiveReplyId(message: any): string | undefined {
   );
 }
 
+function extractLocation(message: any): { lat: number; lng: number } | undefined {
+  const loc =
+    message?.location ??
+    message?.payload?.location ??
+    (message?.type === "location" ? message : undefined);
+  if (!loc) return undefined;
+  const lat = Number(loc.latitude ?? loc.lat);
+  const lng = Number(loc.longitude ?? loc.lng ?? loc.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return { lat, lng };
+}
+
 function mapInteractiveReplyToText(
   replyId: string | undefined,
   state?: ThreadState
@@ -531,8 +543,22 @@ export async function handleMessage(thread: any, message: any) {
 
   const incomingText: string = String(message?.text?.body ?? message?.text ?? "");
   const isInteractiveClick = !!extractInteractiveReplyId(message);
+  const incomingLocation = extractLocation(message);
+  if (incomingLocation) {
+    await updateState({
+      lastLocation: {
+        lat: incomingLocation.lat,
+        lng: incomingLocation.lng,
+        capturedAt: Date.now(),
+      },
+    });
+    console.log(
+      `[BOT] Captured location ${incomingLocation.lat},${incomingLocation.lng}`
+    );
+  }
   const looksLikeNewBookingIntent =
     !isInteractiveClick &&
+    !incomingLocation &&
     /\b(book|booking|appointment|schedule|checkup|consult)\b/i.test(incomingText);
   const sessionBoundaryHit = sessionStart > 0;
 
@@ -579,6 +605,14 @@ export async function handleMessage(thread: any, message: any) {
     const lastContent = typeof lastMessage?.content === "string" ? lastMessage.content : "";
     if (!lastContent || !lastContent.includes(normalizedButtonReply)) {
       (history as any[]).push({ role: "user", content: normalizedButtonReply });
+    }
+  }
+  if (incomingLocation) {
+    const locText = `[location shared: ${incomingLocation.lat}, ${incomingLocation.lng}]`;
+    const lastMessage = (history as any[])[history.length - 1];
+    const lastContent = typeof lastMessage?.content === "string" ? lastMessage.content : "";
+    if (!lastContent.includes(locText)) {
+      (history as any[]).push({ role: "user", content: locText });
     }
   }
 
