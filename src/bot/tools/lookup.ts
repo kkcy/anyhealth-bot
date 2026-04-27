@@ -395,6 +395,25 @@ export function createLookupTools(
           ),
       }),
       execute: async ({ query }) => {
+        if (state.activeClinicId || state.activeServiceId) {
+          const activeClinic = (state.clinicOptions ?? []).find(
+            (c) => c.clinicId === state.activeClinicId
+          );
+          const activeService = (state.serviceOptions ?? []).find(
+            (s) => s.serviceId === state.activeServiceId
+          );
+          return JSON.stringify({
+            alreadyInProgress: true,
+            activeClinic: activeClinic?.clinicName ?? null,
+            activeService: activeService?.serviceName ?? null,
+            instruction:
+              "A booking is already in progress with the selections above. Do not start a new near-me search. " +
+              "Use the active selections from the system prompt's 'Current selections' section. " +
+              "If the user just said yes/confirm/ok, call create_booking. " +
+              "Only call search_services_near_me again if the user explicitly asks to change clinic.",
+          });
+        }
+
         const effectiveQuery = (query ?? state.lastSearchQuery ?? "").trim();
         if (!effectiveQuery) {
           return JSON.stringify({
@@ -505,10 +524,8 @@ export function createLookupTools(
 
         ranked.sort((a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0));
 
-        const sortedClinics = [...ranked, ...excluded];
-
         await updateState({
-          clinicOptions: sortedClinics,
+          clinicOptions: ranked,
           lastSearchQuery: effectiveQuery,
           activeClinicId: undefined,
           activeServiceId: undefined,

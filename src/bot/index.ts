@@ -604,6 +604,7 @@ export async function handleMessage(thread: any, message: any) {
       serviceOptions: undefined,
       doctorOptions: undefined,
       lastSearchQuery: undefined,
+      lastLocation: undefined,
     });
   }
 
