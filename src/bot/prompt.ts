@@ -1,6 +1,6 @@
 import type { ThreadState } from "@/types";
 
-export function buildSystemPrompt(_state?: ThreadState): string {
+export function buildSystemPrompt(state?: ThreadState): string {
   const now = new Date();
   const currentDate = now.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -8,6 +8,10 @@ export function buildSystemPrompt(_state?: ThreadState): string {
     month: "short",
     year: "numeric",
   });
+
+  const unknownSlugBlock = state?.unknownSlugThisTurn
+    ? `\n\n## Unrecognised clinic link\nThe user opened the bot via a deep link with an unrecognised clinic identifier. Briefly tell them you couldn't find that clinic, then continue helping them normally. Do NOT pretend the clinic exists.\n`
+    : "";
 
   return `You are the AnyHealth Clinic Assistant on WhatsApp.
 
@@ -115,5 +119,5 @@ Never guess or infer coverage that isn't explicitly stated.
 - Times: 12-hour format (e.g., 3:00 PM)
 - Currency: RM (e.g., RM 50.00)
 - Use numbered lists for multiple options
-- No markdown tables (WhatsApp renders them poorly)`;
+- No markdown tables (WhatsApp renders them poorly)${unknownSlugBlock}`;
 }

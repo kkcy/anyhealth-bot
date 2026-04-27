@@ -26,7 +26,7 @@ async function main() {
   const tools = createTools(state, updateState);
 
   const result = await generateText({
-    system: buildSystemPrompt(),
+    system: buildSystemPrompt(state),
     tools,
     stopWhen: stepCountIs(8),
     messages: [{ role: "user", content: userMessage }],
