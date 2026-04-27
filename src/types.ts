@@ -11,6 +11,9 @@ export interface ClinicOption {
   doctorSelection: boolean;
   newPatientLimit: number | null;
   matchingServiceCount: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  distanceKm?: number;
 }
 
 export interface ServiceOption {
@@ -53,4 +56,12 @@ export interface ThreadState {
   activeServiceId?: string;
   activeMethodId?: string;
   activeDoctorId?: string;
+
+  // Most recent WhatsApp location share. Cached for the session so the user
+  // is not re-prompted for a second "near me" search.
+  lastLocation?: {
+    lat: number;
+    lng: number;
+    capturedAt: number;
+  };
 }
