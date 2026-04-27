@@ -565,6 +565,7 @@ export async function handleMessage(thread: any, message: any) {
   }
 
   let activeMessage = message;
+  let deepLinkApplied = false;
 
   // --- Deep-link routing ---
   {
@@ -575,6 +576,7 @@ export async function handleMessage(thread: any, message: any) {
       if (clinic) {
         const switchedFrom = state.activeClinicId;
         applyDeepLink(state, clinic);
+        deepLinkApplied = true;
         await thread.setState(state);
         console.log(
           `[DEEP-LINK] event=deep_link slug=${deepLink.slug} resolved=true clinicId=${clinic.id} switchedFrom=${switchedFrom ?? "none"}`,
@@ -638,6 +640,7 @@ export async function handleMessage(thread: any, message: any) {
   // of an in-flight flow.
   if (
     !isInteractiveClick &&
+    !deepLinkApplied &&
     (sessionBoundaryHit || looksLikeNewBookingIntent) &&
     (state.activeClinicId || state.activeServiceId)
   ) {
@@ -773,10 +776,10 @@ export async function handleMessage(thread: any, message: any) {
     await thread.post(
       "Sorry, I'm having trouble right now. Please try again in a moment."
     );
-  }
-
-  if (state.unknownSlugThisTurn) {
-    state.unknownSlugThisTurn = undefined;
-    await thread.setState(state);
+  } finally {
+    if (state.unknownSlugThisTurn) {
+      state.unknownSlugThisTurn = undefined;
+      await thread.setState(state);
+    }
   }
 }
