@@ -5,7 +5,7 @@ import { generateText } from "@/lib/config";
 import { createTools } from "./tools";
 import { buildSystemPrompt } from "./prompt";
 import { validateEnv } from "@/lib/env";
-import { sendListMessage, sendReplyButtons } from "@/lib/whatsapp";
+import { sendListMessage, sendReplyButtons, sendLocationRequest } from "@/lib/whatsapp";
 import type { ThreadState } from "@/types";
 import { stepCountIs } from "ai";
 
@@ -152,11 +152,27 @@ function extractInteractiveReplyId(message: any): string | undefined {
   );
 }
 
+function extractLocation(message: any): { lat: number; lng: number } | undefined {
+  const loc =
+    message?.location ??
+    message?.payload?.location ??
+    (message?.type === "location" ? message : undefined);
+  if (!loc) return undefined;
+  const lat = Number(loc.latitude ?? loc.lat);
+  const lng = Number(loc.longitude ?? loc.lng ?? loc.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return { lat, lng };
+}
+
 function mapInteractiveReplyToText(
   replyId: string | undefined,
   state?: ThreadState
 ): string | undefined {
   if (!replyId) return undefined;
+
+  if (replyId === "NEAR_ME") {
+    return "I'd like to see clinics near me. Please call search_services_near_me with the previous query.";
+  }
 
   if (replyId === "booking_confirm_yes") {
     return "Yes, I confirm the booking. Please call create_booking now.";
@@ -219,18 +235,34 @@ function buildInteractivePlanFromToolResults(
     }
 
     if (
-      toolName === "search_services" &&
+      (toolName === "search_services" || toolName === "search_services_near_me") &&
       data.found === true &&
       Array.isArray(data.clinics) &&
       !state.activeClinicId
     ) {
+      // WhatsApp list rows max out at 10 entries (across all sections),
+      // so when nearMeOption is true we cap data clinics to 9 to leave room
+      // for the synthetic "Near me" row.
+      const cap = data.nearMeOption === true ? 9 : 10;
       const options = data.clinics
-        .slice(0, 10)
+        .slice(0, cap)
         .map((c: any) => ({
           id: `clinic_select_${Number(c.index)}`,
           title: clip(String(c.name ?? `Clinic ${c.index}`), 24),
-          description: c.address ? clip(String(c.address), 72) : undefined,
+          description:
+            typeof c.distanceKm === "number"
+              ? clip(`${c.distanceKm.toFixed(1)} km · ${String(c.address ?? "")}`, 72)
+              : c.address
+              ? clip(String(c.address), 72)
+              : undefined,
         }));
+      if (data.nearMeOption === true) {
+        options.push({
+          id: "NEAR_ME",
+          title: "📍 Near me",
+          description: "Sort clinics by distance from you",
+        });
+      }
       if (options.length > 0) {
         return { body: "Please choose a clinic.", options };
       }
@@ -531,8 +563,34 @@ export async function handleMessage(thread: any, message: any) {
 
   const incomingText: string = String(message?.text?.body ?? message?.text ?? "");
   const isInteractiveClick = !!extractInteractiveReplyId(message);
+  const incomingLocation = extractLocation(message);
+  if (incomingLocation) {
+    await updateState({
+      lastLocation: {
+        lat: incomingLocation.lat,
+        lng: incomingLocation.lng,
+        capturedAt: Date.now(),
+      },
+    });
+    console.log(
+      `[BOT] Captured location ${incomingLocation.lat},${incomingLocation.lng}`
+    );
+  }
+  const interactiveReplyId = extractInteractiveReplyId(message);
+  if (interactiveReplyId === "NEAR_ME" && !state.lastLocation) {
+    const body =
+      "To find clinics near you, please share your location.";
+    const sent = await sendLocationRequest(extractPhone(thread), body);
+    console.log(`[NEAR_ME] short-circuit location_request success=${sent}`);
+    if (!sent) {
+      await thread.post(body);
+    }
+    return;
+  }
+
   const looksLikeNewBookingIntent =
     !isInteractiveClick &&
+    !incomingLocation &&
     /\b(book|booking|appointment|schedule|checkup|consult)\b/i.test(incomingText);
   const sessionBoundaryHit = sessionStart > 0;
 
@@ -558,6 +616,7 @@ export async function handleMessage(thread: any, message: any) {
       serviceOptions: undefined,
       doctorOptions: undefined,
       lastSearchQuery: undefined,
+      lastLocation: undefined,
     });
   }
 
@@ -579,6 +638,14 @@ export async function handleMessage(thread: any, message: any) {
     const lastContent = typeof lastMessage?.content === "string" ? lastMessage.content : "";
     if (!lastContent || !lastContent.includes(normalizedButtonReply)) {
       (history as any[]).push({ role: "user", content: normalizedButtonReply });
+    }
+  }
+  if (incomingLocation) {
+    const locText = `[location shared: ${incomingLocation.lat}, ${incomingLocation.lng}]`;
+    const lastMessage = (history as any[])[history.length - 1];
+    const lastContent = typeof lastMessage?.content === "string" ? lastMessage.content : "";
+    if (!lastContent.includes(locText)) {
+      (history as any[]).push({ role: "user", content: locText });
     }
   }
 
@@ -622,9 +689,29 @@ export async function handleMessage(thread: any, message: any) {
           `state{cli=${!!state.activeClinicId} svc=${!!state.activeServiceId} mtd=${!!state.activeMethodId} doc=${!!state.activeDoctorId} pat=${!!state.activePatientId} | clinicOpts=${state.clinicOptions?.length ?? 0} svcOpts=${state.serviceOptions?.length ?? 0}} ` +
           `planTools=${planFromTools ? planFromTools.body : "-"} planState=${planFromState ? planFromState.body : "-"}`
       );
+      const wantsLocationRequest = (() => {
+        if (!lastToolResults?.length) return false;
+        for (let i = lastToolResults.length - 1; i >= 0; i--) {
+          const raw = lastToolResults[i] ?? {};
+          const toolName = String(raw.toolName ?? raw.tool ?? raw.name ?? "");
+          if (toolName !== "search_services_near_me") continue;
+          const data = parseJsonSafe(raw.result ?? raw.output ?? raw.toolResult ?? raw.value);
+          if (data && typeof data === "object" && (data as any).needsLocation === true) {
+            return true;
+          }
+          return false;
+        }
+        return false;
+      })();
       if (selectionPlan) {
         const sent = await sendInteractivePlan(extractPhone(thread), selectionPlan, result.text);
         console.log(`[INTERACTIVE] sent list "${selectionPlan.body}" success=${sent}`);
+        if (!sent) {
+          await thread.post(result.text);
+        }
+      } else if (wantsLocationRequest) {
+        const sent = await sendLocationRequest(extractPhone(thread), result.text);
+        console.log(`[INTERACTIVE] sent location_request success=${sent}`);
         if (!sent) {
           await thread.post(result.text);
         }
