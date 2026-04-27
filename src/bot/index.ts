@@ -170,6 +170,10 @@ function mapInteractiveReplyToText(
 ): string | undefined {
   if (!replyId) return undefined;
 
+  if (replyId === "NEAR_ME") {
+    return "I'd like to see clinics near me. Please call search_services_near_me with the previous query.";
+  }
+
   if (replyId === "booking_confirm_yes") {
     return "Yes, I confirm the booking. Please call create_booking now.";
   }
@@ -231,18 +235,34 @@ function buildInteractivePlanFromToolResults(
     }
 
     if (
-      toolName === "search_services" &&
+      (toolName === "search_services" || toolName === "search_services_near_me") &&
       data.found === true &&
       Array.isArray(data.clinics) &&
       !state.activeClinicId
     ) {
+      // WhatsApp list rows max out at 10 entries (across all sections),
+      // so when nearMeOption is true we cap data clinics to 9 to leave room
+      // for the synthetic "Near me" row.
+      const cap = data.nearMeOption === true ? 9 : 10;
       const options = data.clinics
-        .slice(0, 10)
+        .slice(0, cap)
         .map((c: any) => ({
           id: `clinic_select_${Number(c.index)}`,
           title: clip(String(c.name ?? `Clinic ${c.index}`), 24),
-          description: c.address ? clip(String(c.address), 72) : undefined,
+          description:
+            typeof c.distanceKm === "number"
+              ? clip(`${c.distanceKm.toFixed(1)} km · ${String(c.address ?? "")}`, 72)
+              : c.address
+              ? clip(String(c.address), 72)
+              : undefined,
         }));
+      if (data.nearMeOption === true) {
+        options.push({
+          id: "NEAR_ME",
+          title: "📍 Near me",
+          description: "Sort clinics by distance from you",
+        });
+      }
       if (options.length > 0) {
         return { body: "Please choose a clinic.", options };
       }
