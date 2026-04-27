@@ -26,6 +26,10 @@ export function createLookupTools(
 
   async function loadClinicsByIds(clinicIds: string[]) {
     const selectAttempts = [
+      "id, name, address, doctor_selection, dr_selection, new_patient_limit, latitude, longitude",
+      "id, name, address, doctor_selection, new_patient_limit, latitude, longitude",
+      "id, name, address, doctor_selection, latitude, longitude",
+      // Fallbacks for older schemas without coords (degraded distance ranking)
       "id, name, address, doctor_selection, dr_selection, new_patient_limit",
       "id, name, address, doctor_selection, new_patient_limit",
       "id, name, address, doctor_selection",
@@ -326,6 +330,14 @@ export function createLookupTools(
             doctorSelection: normalizeDoctorSelection(c),
             newPatientLimit: normalizeNewPatientLimit(c.new_patient_limit),
             matchingServiceCount: clinicCounts[clinicId] ?? 0,
+            latitude:
+              typeof c.latitude === "number" && Number.isFinite(c.latitude)
+                ? c.latitude
+                : null,
+            longitude:
+              typeof c.longitude === "number" && Number.isFinite(c.longitude)
+                ? c.longitude
+                : null,
           };
         });
 
@@ -359,7 +371,10 @@ export function createLookupTools(
             address: c.clinicAddress,
             matchingServices: c.matchingServiceCount,
           })),
-          instruction: "Present these clinics to the user. When they choose, call select_clinic with the index number.",
+          nearMeOption: clinicOptions.length >= 2,
+          instruction:
+            "Present these clinics to the user. When they choose, call select_clinic with the index number. " +
+            "If nearMeOption is true, the system will append a 'Near me' option to the interactive list — if the user picks it, call search_services_near_me.",
         });
       },
     }),
