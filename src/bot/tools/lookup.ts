@@ -2,6 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
 import type { ThreadState, ClinicOption, ServiceOption, MethodOption, DoctorOption } from "@/types";
+import { haversineKm } from "@/lib/geo";
 
 export function createLookupTools(
   state: ThreadState,
@@ -375,6 +376,168 @@ export function createLookupTools(
           instruction:
             "Present these clinics to the user. When they choose, call select_clinic with the index number. " +
             "If nearMeOption is true, the system will append a 'Near me' option to the interactive list — if the user picks it, call search_services_near_me.",
+        });
+      },
+    }),
+
+    search_services_near_me: tool({
+      description:
+        "Find clinics matching a service keyword sorted by distance from the user's shared location. " +
+        "Call ONLY after the user has shared their WhatsApp location. " +
+        "If the user has not shared a location, this tool returns {needsLocation: true} — " +
+        "in that case ask the user to share their location via WhatsApp's attachment menu (📎 → Location).",
+      inputSchema: z.object({
+        query: z
+          .string()
+          .optional()
+          .describe(
+            "Service keyword. If omitted, falls back to the most recent search query in state."
+          ),
+      }),
+      execute: async ({ query }) => {
+        const effectiveQuery = (query ?? state.lastSearchQuery ?? "").trim();
+        if (!effectiveQuery) {
+          return JSON.stringify({
+            error:
+              "No search query available. Ask the user what service they are looking for, then call search_services first.",
+          });
+        }
+
+        if (!state.lastLocation) {
+          return JSON.stringify({
+            needsLocation: true,
+            instruction:
+              "Ask the user to share their location via WhatsApp's attachment menu (📎 → Location → Send). " +
+              "Do not call this tool again until they share it.",
+          });
+        }
+
+        const words = effectiveQuery
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((w) => w.length > 1);
+
+        const orConditions = words
+          .flatMap((word) => [
+            `service_name.ilike.%${word}%`,
+            `description.ilike.%${word}%`,
+            `category.ilike.%${word}%`,
+          ])
+          .join(",");
+
+        const { data: cServices, error: cError } = await supabase
+          .from("c_a_clinic_service")
+          .select("clinic_id")
+          .eq("is_active", true)
+          .or(orConditions)
+          .limit(30);
+
+        const { data: tcmServices, error: tcmError } = await supabase
+          .from("tcm_a_clinic_service")
+          .select("clinic_id")
+          .eq("is_active", true)
+          .or(orConditions)
+          .limit(30);
+
+        if (cError || tcmError) {
+          return JSON.stringify({
+            error: "Failed to search services",
+            detail: cError?.message || tcmError?.message,
+          });
+        }
+
+        const allMatches = [...(cServices ?? []), ...(tcmServices ?? [])];
+        if (allMatches.length === 0) {
+          return JSON.stringify({
+            found: false,
+            message: "No clinics found matching that service.",
+          });
+        }
+
+        const clinicCounts: Record<string, number> = {};
+        for (const m of allMatches) {
+          clinicCounts[m.clinic_id] = (clinicCounts[m.clinic_id] ?? 0) + 1;
+        }
+
+        const clinicIds = Object.keys(clinicCounts);
+        const { data: clinics, error: clinicLoadError } = await loadClinicsByIds(clinicIds);
+        if (clinicLoadError) {
+          return JSON.stringify({
+            error: "Failed to load clinics",
+            detail: clinicLoadError,
+          });
+        }
+
+        const userLoc = { lat: state.lastLocation.lat, lng: state.lastLocation.lng };
+
+        const ranked: ClinicOption[] = [];
+        const excluded: ClinicOption[] = [];
+
+        for (const c of clinics ?? []) {
+          const clinicId = String(c.id ?? "");
+          const lat =
+            typeof c.latitude === "number" && Number.isFinite(c.latitude)
+              ? c.latitude
+              : null;
+          const lng =
+            typeof c.longitude === "number" && Number.isFinite(c.longitude)
+              ? c.longitude
+              : null;
+
+          const opt: ClinicOption = {
+            clinicId,
+            clinicName: String(c.name ?? ""),
+            clinicAddress: String(c.address ?? ""),
+            doctorSelection: normalizeDoctorSelection(c),
+            newPatientLimit: normalizeNewPatientLimit(c.new_patient_limit),
+            matchingServiceCount: clinicCounts[clinicId] ?? 0,
+            latitude: lat,
+            longitude: lng,
+          };
+
+          if (lat === null || lng === null) {
+            excluded.push(opt);
+          } else {
+            opt.distanceKm = haversineKm(userLoc, { lat, lng });
+            ranked.push(opt);
+          }
+        }
+
+        ranked.sort((a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0));
+
+        const sortedClinics = [...ranked, ...excluded];
+
+        await updateState({
+          clinicOptions: sortedClinics,
+          lastSearchQuery: effectiveQuery,
+          activeClinicId: undefined,
+          activeServiceId: undefined,
+          activeMethodId: undefined,
+          activeDoctorId: undefined,
+          serviceOptions: undefined,
+          doctorOptions: undefined,
+        });
+
+        return JSON.stringify({
+          found: true,
+          clinics: ranked.map((c, i) => ({
+            index: i + 1,
+            name: c.clinicName,
+            address: c.clinicAddress,
+            matchingServices: c.matchingServiceCount,
+            distanceKm: c.distanceKm !== undefined
+              ? Number(c.distanceKm.toFixed(1))
+              : null,
+          })),
+          excluded: excluded.map((c) => ({
+            name: c.clinicName,
+            address: c.clinicAddress,
+            reason: "no map data",
+          })),
+          nearMeOption: false,
+          instruction:
+            "Present these clinics with their distances. When the user chooses, call select_clinic with the index number. " +
+            "If any clinics are in 'excluded', mention them by name and note that we don't have their map location yet.",
         });
       },
     }),
