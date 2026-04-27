@@ -8,6 +8,9 @@ import { validateEnv } from "@/lib/env";
 import { sendListMessage, sendReplyButtons, sendLocationRequest } from "@/lib/whatsapp";
 import type { ThreadState } from "@/types";
 import { stepCountIs } from "ai";
+import { parseDeepLinkToken, applyDeepLink } from "./deep-link";
+import { resolveClinicBySlug } from "./clinic-resolver";
+import { sendWelcome } from "./messages/welcome";
 
 let _bot: ReturnType<typeof createBot> | null = null;
 
@@ -561,9 +564,43 @@ export async function handleMessage(thread: any, message: any) {
     }
   }
 
-  const incomingText: string = String(message?.text?.body ?? message?.text ?? "");
-  const isInteractiveClick = !!extractInteractiveReplyId(message);
-  const incomingLocation = extractLocation(message);
+  let activeMessage = message;
+
+  // --- Deep-link routing ---
+  {
+    const tokenText: string = String(activeMessage?.text?.body ?? activeMessage?.text ?? "");
+    const deepLink = parseDeepLinkToken(tokenText);
+    if (deepLink.kind === "match") {
+      const clinic = await resolveClinicBySlug(deepLink.slug);
+      if (clinic) {
+        const switchedFrom = state.activeClinicId;
+        applyDeepLink(state, clinic);
+        await thread.setState(state);
+        console.log(
+          `[DEEP-LINK] event=deep_link slug=${deepLink.slug} resolved=true clinicId=${clinic.id} switchedFrom=${switchedFrom ?? "none"}`,
+        );
+        await sendWelcome(thread, clinic, state.language);
+        if (!deepLink.residual) {
+          return; // turn ends; LLM not invoked
+        }
+        // Forward residual into the LLM agent loop.
+        activeMessage = { ...activeMessage, text: deepLink.residual };
+      } else {
+        state.unknownSlugThisTurn = true;
+        await thread.setState(state);
+        console.log(`[DEEP-LINK] event=deep_link slug=${deepLink.slug} resolved=false`);
+        if (deepLink.residual) {
+          activeMessage = { ...activeMessage, text: deepLink.residual };
+        }
+        // Fall through to LLM with one-shot prompt flag set.
+      }
+    }
+  }
+  // --- end deep-link routing ---
+
+  const incomingText: string = String(activeMessage?.text?.body ?? activeMessage?.text ?? "");
+  const isInteractiveClick = !!extractInteractiveReplyId(activeMessage);
+  const incomingLocation = extractLocation(activeMessage);
   if (incomingLocation) {
     await updateState({
       lastLocation: {
@@ -576,7 +613,7 @@ export async function handleMessage(thread: any, message: any) {
       `[BOT] Captured location ${incomingLocation.lat},${incomingLocation.lng}`
     );
   }
-  const interactiveReplyId = extractInteractiveReplyId(message);
+  const interactiveReplyId = extractInteractiveReplyId(activeMessage);
   if (interactiveReplyId === "NEAR_ME" && !state.lastLocation) {
     const body =
       "To find clinics near you, please share your location.";
@@ -630,7 +667,7 @@ export async function handleMessage(thread: any, message: any) {
     : sessionMessages;
   const history = await toAiMessages(messages);
   const normalizedButtonReply = mapInteractiveReplyToText(
-    extractInteractiveReplyId(message),
+    extractInteractiveReplyId(activeMessage),
     state
   );
   if (normalizedButtonReply) {
@@ -736,5 +773,10 @@ export async function handleMessage(thread: any, message: any) {
     await thread.post(
       "Sorry, I'm having trouble right now. Please try again in a moment."
     );
+  }
+
+  if (state.unknownSlugThisTurn) {
+    state.unknownSlugThisTurn = undefined;
+    await thread.setState(state);
   }
 }
