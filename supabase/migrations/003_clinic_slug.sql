@@ -3,7 +3,7 @@
 
 BEGIN;
 
-ALTER TABLE c_a_clinics ADD COLUMN slug text;
+ALTER TABLE c_a_clinics ADD COLUMN IF NOT EXISTS slug text;
 
 -- Backfill from name: lowercase, strip non-alphanumeric (keep space, hyphen),
 -- collapse runs of space/hyphen to single hyphen, trim, truncate to 40 chars.
@@ -14,7 +14,7 @@ SET slug = TRIM(BOTH '-' FROM
       REGEXP_REPLACE(LOWER(COALESCE(name, '')), '[^a-z0-9 -]', '', 'g'),
       '[\s-]+', '-', 'g'
     ),
-    40
+    37
   )
 );
 
@@ -23,6 +23,9 @@ UPDATE c_a_clinics
 SET slug = 'clinic-' || SUBSTRING(id::text, 1, 8)
 WHERE slug IS NULL OR slug = '';
 
+-- Note: this can theoretically collide if a clinic's natural slug already
+-- equals another clinic's disambiguated form (e.g. names "Dental" + "Dental 2").
+-- Not a concern at MVP scale; if it ever fails, manually adjust slugs.
 -- Disambiguate collisions with -2, -3, ...
 WITH numbered AS (
   SELECT id, slug,
@@ -36,5 +39,7 @@ WHERE c.id = n.id;
 
 ALTER TABLE c_a_clinics ALTER COLUMN slug SET NOT NULL;
 ALTER TABLE c_a_clinics ADD CONSTRAINT c_a_clinics_slug_key UNIQUE (slug);
+
+COMMENT ON COLUMN c_a_clinics.slug IS 'URL-safe kebab-case identifier for WhatsApp deep-link routing. Pattern: ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$';
 
 COMMIT;
