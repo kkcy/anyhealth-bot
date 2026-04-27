@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { parseDeepLinkToken, applyDeepLink } from "../src/bot/deep-link";
 import type { ThreadState } from "../src/types";
 
@@ -45,6 +44,10 @@ function assert(cond: boolean, label: string) {
 {
   const r = parseDeepLinkToken("clinic_acme-");
   assert(r.kind === "none", "trailing hyphen in slug → none");
+}
+{
+  const r = parseDeepLinkToken("clinic_acme- hello");
+  assert(r.kind === "none", "trailing hyphen before space → none");
 }
 {
   const r = parseDeepLinkToken("");

@@ -10,7 +10,7 @@
     "test:tools": "tsx --tsconfig tsconfig.json scripts/test-tools.ts",
     "test:guards": "tsx --tsconfig tsconfig.json scripts/test-guards.ts",
     "test:smoke": "tsx --tsconfig tsconfig.json scripts/test-smoke.ts",
-    "test:deep-link-parser": "tsx scripts/test-deep-link-parser.ts",
+    "test:deep-link-parser": "tsx --tsconfig tsconfig.json scripts/test-deep-link-parser.ts",
     "test:near-me": "tsx scripts/test-near-me.ts",
     "test:geo": "tsx scripts/test-geo.ts",
     "test:interactive": "bun --tsconfig-override tsconfig.json scripts/test-interactive.ts"
