@@ -4,3 +4,6 @@ node_modules/
 .env*.local
 *.tsbuildinfo
 next-env.d.ts
+
+# Local git worktrees (created by superpowers workflow)
+.worktrees/
