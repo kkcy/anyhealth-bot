@@ -6,7 +6,8 @@ BEGIN;
 ALTER TABLE c_a_clinics ADD COLUMN IF NOT EXISTS slug text;
 
 -- Backfill from name: lowercase, strip non-alphanumeric (keep space, hyphen),
--- collapse runs of space/hyphen to single hyphen, trim, truncate to 40 chars.
+-- collapse runs of space/hyphen to single hyphen, trim, truncate to 37 chars
+-- (room for up to "-99" disambiguation suffix without exceeding 40-char URL cap).
 UPDATE c_a_clinics
 SET slug = TRIM(BOTH '-' FROM
   LEFT(
