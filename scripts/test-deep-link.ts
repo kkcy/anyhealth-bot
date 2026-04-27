@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { resolveClinicBySlug } from "../src/bot/clinic-resolver";
 import { applyDeepLink } from "../src/bot/deep-link";
 import { buildWelcomeText } from "../src/bot/messages/welcome";
