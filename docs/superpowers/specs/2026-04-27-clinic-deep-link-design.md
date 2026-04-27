@@ -106,7 +106,7 @@ Reuse existing fields:
 - **Preserved:** `userId`, `phone`, `patients`, `activePatientId`, `verified`, `language`
 
 Transient one-shot field used only within a single turn:
-- `unknownSlugThisTurn?: string` — added as an optional field on `ThreadState`. Set when slug fails to resolve; consumed by the system-prompt builder; cleared at end of turn (in the same place that already finalizes per-turn state).
+- `unknownSlugThisTurn?: boolean` — added as an optional field on `ThreadState`. Set to `true` when an inbound slug fails to resolve; consumed by the system-prompt builder as a presence check; cleared at end of turn (in the same place that already finalizes per-turn state). The slug itself is not retained — only the fact that resolution failed.
 
 ## Components
 
