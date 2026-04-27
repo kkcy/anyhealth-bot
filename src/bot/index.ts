@@ -576,6 +576,18 @@ export async function handleMessage(thread: any, message: any) {
       `[BOT] Captured location ${incomingLocation.lat},${incomingLocation.lng}`
     );
   }
+  const interactiveReplyId = extractInteractiveReplyId(message);
+  if (interactiveReplyId === "NEAR_ME" && !state.lastLocation) {
+    const body =
+      "To find clinics near you, please share your location.";
+    const sent = await sendLocationRequest(extractPhone(thread), body);
+    console.log(`[NEAR_ME] short-circuit location_request success=${sent}`);
+    if (!sent) {
+      await thread.post(body);
+    }
+    return;
+  }
+
   const looksLikeNewBookingIntent =
     !isInteractiveClick &&
     !incomingLocation &&
