@@ -5,7 +5,7 @@ import { generateText } from "@/lib/config";
 import { createTools } from "./tools";
 import { buildSystemPrompt } from "./prompt";
 import { validateEnv } from "@/lib/env";
-import { sendListMessage, sendReplyButtons } from "@/lib/whatsapp";
+import { sendListMessage, sendReplyButtons, sendLocationRequest } from "@/lib/whatsapp";
 import type { ThreadState } from "@/types";
 import { stepCountIs } from "ai";
 
@@ -677,9 +677,29 @@ export async function handleMessage(thread: any, message: any) {
           `state{cli=${!!state.activeClinicId} svc=${!!state.activeServiceId} mtd=${!!state.activeMethodId} doc=${!!state.activeDoctorId} pat=${!!state.activePatientId} | clinicOpts=${state.clinicOptions?.length ?? 0} svcOpts=${state.serviceOptions?.length ?? 0}} ` +
           `planTools=${planFromTools ? planFromTools.body : "-"} planState=${planFromState ? planFromState.body : "-"}`
       );
+      const wantsLocationRequest = (() => {
+        if (!lastToolResults?.length) return false;
+        for (let i = lastToolResults.length - 1; i >= 0; i--) {
+          const raw = lastToolResults[i] ?? {};
+          const toolName = String(raw.toolName ?? raw.tool ?? raw.name ?? "");
+          if (toolName !== "search_services_near_me") continue;
+          const data = parseJsonSafe(raw.result ?? raw.output ?? raw.toolResult ?? raw.value);
+          if (data && typeof data === "object" && (data as any).needsLocation === true) {
+            return true;
+          }
+          return false;
+        }
+        return false;
+      })();
       if (selectionPlan) {
         const sent = await sendInteractivePlan(extractPhone(thread), selectionPlan, result.text);
         console.log(`[INTERACTIVE] sent list "${selectionPlan.body}" success=${sent}`);
+        if (!sent) {
+          await thread.post(result.text);
+        }
+      } else if (wantsLocationRequest) {
+        const sent = await sendLocationRequest(extractPhone(thread), result.text);
+        console.log(`[INTERACTIVE] sent location_request success=${sent}`);
         if (!sent) {
           await thread.post(result.text);
         }

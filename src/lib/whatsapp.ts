@@ -20,7 +20,7 @@ interface ListSection {
 }
 
 export interface CapturedInteractive {
-  kind: "buttons" | "list";
+  kind: "buttons" | "list" | "location_request";
   to: string;
   body: string;
   options: Array<{ id: string; title: string; description?: string }>;
@@ -154,6 +154,53 @@ export async function sendListMessage(
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     console.error(`[WHATSAPP] sendListMessage failed (${res.status}):`, detail);
+    return false;
+  }
+  return true;
+}
+
+export async function sendLocationRequest(
+  to: string,
+  body: string
+): Promise<boolean> {
+  if (isTestMode()) {
+    captureQueue.push({
+      kind: "location_request",
+      to,
+      body,
+      options: [{ id: "send_location", title: "Send location" }],
+    });
+    return true;
+  }
+
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!phoneNumberId || !accessToken) {
+    console.warn("[WHATSAPP] Missing WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN");
+    return false;
+  }
+
+  const res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "location_request_message",
+        body: { text: body },
+        action: { name: "send_location" },
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    console.error(`[WHATSAPP] sendLocationRequest failed (${res.status}):`, detail);
     return false;
   }
   return true;
