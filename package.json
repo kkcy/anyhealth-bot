@@ -10,6 +10,7 @@
     "test:tools": "tsx --tsconfig tsconfig.json scripts/test-tools.ts",
     "test:guards": "tsx --tsconfig tsconfig.json scripts/test-guards.ts",
     "test:smoke": "tsx --tsconfig tsconfig.json scripts/test-smoke.ts",
+    "test:friendly-prefill": "tsx --tsconfig tsconfig.json scripts/test-friendly-prefill.ts",
     "test:deep-link-parser": "tsx --tsconfig tsconfig.json scripts/test-deep-link-parser.ts",
     "test:deep-link": "tsx --tsconfig tsconfig.json scripts/test-deep-link.ts",
     "test:clinic-link": "tsx --tsconfig tsconfig.json scripts/test-clinic-link.ts",
