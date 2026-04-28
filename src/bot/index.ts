@@ -8,8 +8,8 @@ import { validateEnv } from "@/lib/env";
 import { sendListMessage, sendReplyButtons, sendLocationRequest } from "@/lib/whatsapp";
 import type { ThreadState } from "@/types";
 import { stepCountIs } from "ai";
-import { parseDeepLinkToken, applyDeepLink } from "./deep-link";
-import { resolveClinicBySlug } from "./clinic-resolver";
+import { parseDeepLinkToken, parseFriendlyPrefill, applyDeepLink } from "./deep-link";
+import { resolveClinicBySlug, resolveClinicByName } from "./clinic-resolver";
 import { sendWelcome } from "./messages/welcome";
 
 let _bot: ReturnType<typeof createBot> | null = null;
@@ -595,6 +595,36 @@ export async function handleMessage(thread: any, message: any) {
           activeMessage = { ...activeMessage, text: deepLink.residual };
         }
         // Fall through to LLM with one-shot prompt flag set.
+      }
+    } else {
+      // Legacy token didn't match — try the friendly prefill, but only when
+      // no booking is in progress. Mid-conversation, an organic message that
+      // happens to start with "Hi! I'd like to book at …" should NOT reset state.
+      const isFreshBooking =
+        !state.activeClinicId &&
+        !state.activeServiceId &&
+        !state.activeDoctorId &&
+        !state.lastSearchQuery;
+      if (isFreshBooking) {
+        const friendly = parseFriendlyPrefill(tokenText);
+        if (friendly.kind === "match") {
+          const clinic = await resolveClinicByName(friendly.clinicName);
+          if (clinic) {
+            applyDeepLink(state, clinic);
+            deepLinkApplied = true;
+            await thread.setState(state);
+            console.log(
+              `[DEEP-LINK] event=friendly_prefill name="${friendly.clinicName}" resolved=true clinicId=${clinic.id}`,
+            );
+            await sendWelcome(thread, clinic, state.language);
+            return; // turn ends; LLM not invoked
+          }
+          // Unresolved friendly prefill: do NOT set unknownSlugThisTurn —
+          // the user's intent is plain English, just let the LLM handle it.
+          console.log(
+            `[DEEP-LINK] event=friendly_prefill name="${friendly.clinicName}" resolved=false`,
+          );
+        }
       }
     }
   }
