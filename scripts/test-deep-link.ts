@@ -94,6 +94,26 @@ async function main() {
   assert(zh.includes("*Acme Dental*") && zh.includes("您好"), "zh welcome");
   assert(fallback === en, "undefined language → english fallback");
 
+  // Route handler — hit-branch. Uses real seeded slug from Supabase.
+  {
+    process.env.WHATSAPP_BUSINESS_PHONE = process.env.WHATSAPP_BUSINESS_PHONE ?? "60123456789";
+    const { GET } = await import("../src/app/c/[slug]/route");
+    const slug = "one-care-clinic";
+    const req = new Request(`https://example.test/c/${slug}`, { method: "GET" });
+    const res = await GET(req as any, { params: Promise.resolve({ slug }) });
+    assert(res.status === 302, `GET /c/${slug} → 302`);
+    const loc = res.headers.get("location") ?? "";
+    assert(
+      loc.startsWith("https://wa.me/60123456789?text="),
+      `GET /c/${slug} → wa.me redirect; got=${loc}`,
+    );
+    // Both straight apostrophe (%27) and unencoded ' are valid; accept either.
+    assert(
+      loc.includes("Hi!%20I") && loc.includes("d%20like%20to%20book%20at%20"),
+      "wa.me URL embeds the prefill template",
+    );
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} failure(s)`);
     process.exit(1);
