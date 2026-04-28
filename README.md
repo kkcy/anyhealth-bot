@@ -47,6 +47,19 @@ Retrieve consultation reports by date range or diagnosis description (e.g., "the
 ### 6. Insurance Q&A
 Patient uploads insurance policy PDF → bot extracts and stores text → patient can ask coverage questions. Bot answers strictly from policy text — responds "not mentioned in your policy" if information isn't found. Supports multiple policies per patient.
 
+## Deep Linking
+
+### Branded short URL
+
+Patient-facing entry point. Clinics share `https://<your-public-domain>/c/<clinic-slug>` (e.g. on a website button, business card, QR). The route 302s to `wa.me` with a human-readable prefill the bot recognises:
+
+- Visible to user: `Hi! I'd like to book at One Care Clinic`
+- Bot effect: same as the legacy `clinic_<slug>` token — pre-scopes the booking to that clinic and sends the welcome template.
+
+Required env: `WHATSAPP_BUSINESS_PHONE` (E.164 without `+`). Optional: `PUBLIC_BASE_URL` for `buildShortUrl()` callers.
+
+The legacy `clinic_<slug>` text token still works for any links already in the wild.
+
 ## Identity Model
 
 One phone number can have multiple patients (e.g., parent managing children's appointments).
