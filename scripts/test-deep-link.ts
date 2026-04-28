@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { resolveClinicBySlug } from "../src/bot/clinic-resolver";
+import { resolveClinicByName, resolveClinicBySlug } from "../src/bot/clinic-resolver";
 import { applyDeepLink } from "../src/bot/deep-link";
 import { buildWelcomeText } from "../src/bot/messages/welcome";
 import { getSupabase } from "../src/lib/supabase";
@@ -50,12 +50,24 @@ async function main() {
   const r2 = await resolveClinicBySlug("definitely-not-a-real-clinic-xyz");
   assert(r2 === null, "resolver returns null for unknown slug");
 
-  // 3. State transform: fresh state pre-scoped to clinic.
+  // 3. resolveClinicByName: case-insensitive exact match.
+  {
+    const c = await resolveClinicByName("one care clinic");
+    assert(!!c && c.name.length > 0, "resolveClinicByName: case-insensitive exact match");
+  }
+
+  // 4. resolveClinicByName: miss → null.
+  {
+    const c = await resolveClinicByName("__nonexistent clinic xyz__");
+    assert(c === null, "resolveClinicByName: miss → null");
+  }
+
+  // 5. State transform: fresh state pre-scoped to clinic.
   const sFresh = makeState();
   applyDeepLink(sFresh, { id: clinicA.id, name: clinicA.name });
   assert(sFresh.activeClinicId === clinicA.id, "fresh state → activeClinicId set");
 
-  // 4. State transform: mid-booking switch wipes booking fields.
+  // 6. State transform: mid-booking switch wipes booking fields.
   const sMid = makeState({
     activeClinicId: "OTHER_CLINIC_ID_DOES_NOT_MATTER",
     activeServiceId: "svc-1",
@@ -72,7 +84,7 @@ async function main() {
   assert(sMid.verified === true, "switch → verified preserved");
   assert(sMid.language === "ms", "switch → language preserved");
 
-  // 5. Welcome template uses correct language.
+  // 7. Welcome template uses correct language.
   const en = buildWelcomeText("Acme Dental", "en");
   const ms = buildWelcomeText("Acme Dental", "ms");
   const zh = buildWelcomeText("Acme Dental", "zh");
