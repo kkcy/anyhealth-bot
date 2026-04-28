@@ -603,6 +603,7 @@ export async function handleMessage(thread: any, message: any) {
       const isFreshBooking =
         !state.activeClinicId &&
         !state.activeServiceId &&
+        !state.activeMethodId &&
         !state.activeDoctorId &&
         !state.lastSearchQuery;
       if (isFreshBooking) {

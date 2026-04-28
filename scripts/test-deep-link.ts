@@ -51,9 +51,13 @@ async function main() {
   assert(r2 === null, "resolver returns null for unknown slug");
 
   // 3. resolveClinicByName: case-insensitive exact match.
+  // Lower-cased input must round-trip to the seeded clinic with name preserved.
   {
     const c = await resolveClinicByName("one care clinic");
-    assert(!!c && c.name.length > 0, "resolveClinicByName: case-insensitive exact match");
+    assert(
+      !!c && c.name.toLowerCase() === "one care clinic",
+      "resolveClinicByName: case-insensitive exact match",
+    );
   }
 
   // 4. resolveClinicByName: miss → null.

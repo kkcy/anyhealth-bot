@@ -159,6 +159,7 @@ WHATSAPP_ACCESS_TOKEN=
 WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_VERIFY_TOKEN=           # Webhook verification
 WHATSAPP_APP_SECRET=             # Meta App Secret for signature verification
+WHATSAPP_BUSINESS_PHONE=         # Dialable E.164 number (no '+'); used in /c/[slug] wa.me redirects
 
 # Database
 SUPABASE_URL=
