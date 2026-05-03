@@ -205,3 +205,111 @@ export async function sendLocationRequest(
   }
   return true;
 }
+
+// ---------- Templates ----------
+
+export type TemplateSendKind =
+  | "ok"
+  | "transient"
+  | "permanent_block"
+  | "permanent_template";
+
+export interface TemplateSendResult {
+  kind: TemplateSendKind;
+  detail?: string;
+  metaCode?: number;
+}
+
+export interface MetaErrorInput {
+  http: number;            // HTTP status, 0 if network error
+  metaCode?: number;       // Meta error.code from response body
+  body: string;            // raw response body text
+}
+
+const PERMANENT_BLOCK_CODES = new Set<number>([131026, 131047, 131049]);
+
+export function classifyMetaError(e: MetaErrorInput): TemplateSendResult {
+  if (e.http >= 200 && e.http < 300) return { kind: "ok" };
+  if (e.metaCode && PERMANENT_BLOCK_CODES.has(e.metaCode)) {
+    return { kind: "permanent_block", metaCode: e.metaCode, detail: e.body };
+  }
+  if (e.metaCode && e.metaCode >= 132000 && e.metaCode < 133000) {
+    return { kind: "permanent_template", metaCode: e.metaCode, detail: e.body };
+  }
+  if (e.http >= 500 || e.http === 0) {
+    return { kind: "transient", detail: e.body };
+  }
+  // Unknown 4xx: fail-safe transient, will retry up to attempts cap.
+  return { kind: "transient", detail: e.body, metaCode: e.metaCode };
+}
+
+export interface TemplateComponent {
+  type: "body" | "button" | "header";
+  sub_type?: "quick_reply" | "url";
+  index?: string;
+  parameters?: Array<
+    | { type: "text"; text: string }
+    | { type: "payload"; payload: string }
+  >;
+}
+
+export async function sendTemplate(args: {
+  to: string;
+  name: string;
+  lang: string;
+  components: TemplateComponent[];
+}): Promise<TemplateSendResult> {
+  if (isTestMode()) {
+    captureQueue.push({
+      kind: "buttons", // re-use existing capture shape for snapshotting
+      to: args.to,
+      body: `template:${args.name}`,
+      options: args.components
+        .filter((c) => c.type === "button")
+        .map((c) => ({
+          id: (c.parameters?.[0] as any)?.payload ?? "",
+          title: "(template button)",
+        })),
+    });
+    return { kind: "ok" };
+  }
+
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!phoneNumberId || !accessToken) {
+    return { kind: "transient", detail: "missing WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN" };
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: args.to,
+        type: "template",
+        template: {
+          name: args.name,
+          language: { code: args.lang },
+          components: args.components,
+        },
+      }),
+    });
+  } catch (err) {
+    return classifyMetaError({ http: 0, metaCode: undefined, body: String(err) });
+  }
+
+  const body = await res.text().catch(() => "");
+  let metaCode: number | undefined;
+  try {
+    const parsed = JSON.parse(body);
+    metaCode = parsed?.error?.code;
+  } catch { /* non-JSON response */ }
+
+  return classifyMetaError({ http: res.status, metaCode, body });
+}
+
