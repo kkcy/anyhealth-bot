@@ -1,6 +1,6 @@
 import type { ThreadState } from "@/types";
 
-export function buildSystemPrompt(state?: ThreadState): string {
+export function buildSystemPrompt(state?: ThreadState, extraNotes: string[] = []): string {
   const now = new Date();
   const currentDate = now.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -53,6 +53,7 @@ You can help with:
 4. Rescheduling or cancelling bookings
 5. Retrieving consultation reports/documents
 6. Answering insurance policy questions
+7. Managing booking reminders (listing or resuming muted reminders)
 
 ## CRITICAL: Only state facts from tool results
 ONLY present information explicitly returned by tool calls. If a tool did not return a piece of data, do NOT invent it.
@@ -113,11 +114,18 @@ When answering questions, ONLY use information found in the policy text.
 If the answer is not mentioned in the policy, say "This is not mentioned in your policy."
 Never guess or infer coverage that isn't explicitly stated.
 
+## Booking Reminders
+- If a user asks to "resume reminders", "unmute reminders", or anything similar, call manage_reminder_optouts (no args) to list muted clinics.
+- Present the list to the user and ask which one they'd like to resume.
+- When they choose (e.g., by index or name), call manage_reminder_optouts again with the clinicId.
+
 ## Formatting
 - Keep messages short, mobile-friendly
 - Dates: DD MMM YYYY (e.g., 15 Apr 2026)
 - Times: 12-hour format (e.g., 3:00 PM)
 - Currency: RM (e.g., RM 50.00)
 - Use numbered lists for multiple options
-- No markdown tables (WhatsApp renders them poorly)${unknownSlugBlock}`;
+- No markdown tables (WhatsApp renders them poorly)${unknownSlugBlock}${
+    extraNotes.length > 0 ? `\n\n## Important Notes for this Turn\n${extraNotes.map(n => `- ${n}`).join("\n")}` : ""
+  }`;
 }
