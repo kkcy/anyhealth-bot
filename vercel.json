@@ -1,5 +1,6 @@
 {
   "crons": [
-    { "path": "/api/cron/reminders", "schedule": "*/5 * * * *" }
+    { "path": "/api/cron/reminders", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/reminders-reconcile", "schedule": "0 18 * * *" }
   ]
 }
