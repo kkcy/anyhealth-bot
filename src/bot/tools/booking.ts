@@ -2,6 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
 import type { ThreadState } from "@/types";
+import { recomputeReminders } from "@/lib/reminders/scheduler";
 
 function normalizeNewPatientLimit(value: unknown): number | null {
   if (value === null || value === undefined) return null;
@@ -279,6 +280,11 @@ export function createBookingTools(
           doctorOptions: undefined,
         });
 
+        // Best-effort reminder enqueue. Never blocks user-facing booking confirmation.
+        recomputeReminders(booking.id).catch((e) => {
+          console.error("[REMINDER] recompute after create failed:", e);
+        });
+
         return JSON.stringify({
           success: true,
           bookingId: booking.id,
@@ -418,6 +424,11 @@ export function createBookingTools(
           return JSON.stringify({ error: "Failed to reschedule", detail: updateError.message });
         }
 
+        // Best-effort reminder enqueue. Never blocks user-facing booking confirmation.
+        recomputeReminders(bookingId).catch((e) => {
+          console.error("[REMINDER] recompute after reschedule failed:", e);
+        });
+
         return JSON.stringify({
           success: true,
           bookingId,
@@ -462,6 +473,11 @@ export function createBookingTools(
         if (updateError) {
           return JSON.stringify({ error: "Failed to cancel", detail: updateError.message });
         }
+
+        // Recompute (will delete pending jobs since status=cancelled).
+        recomputeReminders(bookingId).catch((e) => {
+          console.error("[REMINDER] recompute after cancel failed:", e);
+        });
 
         return JSON.stringify({
           success: true,
