@@ -1,6 +1,6 @@
 import { getSupabase } from "../supabase";
 import { getBookingForReminder } from "./booking-loader";
-import { isMuted } from "./optout";
+import { isMuted, unmuteClinic } from "./optout";
 import { pickTemplateName, buildTemplateVars } from "./templates";
 import type { BookingForReminder, ReminderKind } from "./types";
 
@@ -65,6 +65,12 @@ export async function recomputeReminders(bookingId: string): Promise<void> {
 
   const booking = await getBookingForReminder(bookingId);
   if (!booking) return;
+
+  // Auto-unmute clinic if patient muted via button — taking action (rebooking)
+  // is taken as renewed consent. auto_block mutes are NOT cleared (Meta says
+  // the user is unreachable; clearing would re-spam).
+  await unmuteClinic(booking.phone, booking.clinic_id, { onlyButtonSource: true });
+
   if (await isMuted(booking.phone, booking.clinic_id)) return;
 
   const jobs = computeReminderJobs(booking);
@@ -114,4 +120,49 @@ export async function enqueueDocReady(args: {
     },
     { onConflict: "booking_id,kind" },
   );
+}
+
+/**
+ * Backfill: find completed bookings (status='completed') that have a generated
+ * document but no doc_ready reminder enqueued. Insert one per missing.
+ *
+ * The exact join depends on where consultation reports / MCs live in the
+ * Supabase schema. Adapt the SELECT below once that table is identified.
+ * For MVP, we hard-limit to bookings completed in the last 7 days to bound work.
+ */
+export async function reconcileDocReady(): Promise<{ enqueued: number }> {
+  const sb = getSupabase();
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString().split("T")[0];
+
+  // Step 1: find recently completed bookings missing a doc_ready job
+  const { data: candidates } = await sb
+    .from("c_s_bookings")
+    .select("id")
+    .eq("status", "completed")
+    .gte("original_date", sevenDaysAgo)
+    .limit(200);
+
+  if (!candidates || candidates.length === 0) return { enqueued: 0 };
+
+  const ids = candidates.map((c) => c.id);
+  const { data: existing } = await sb
+    .from("reminder_jobs")
+    .select("booking_id")
+    .in("booking_id", ids)
+    .eq("kind", "doc_ready");
+  const have = new Set((existing ?? []).map((r) => r.booking_id as string));
+  const missing = ids.filter((i) => !have.has(i));
+
+  let enqueued = 0;
+  for (const bookingId of missing) {
+    // TODO(operator): once the consultation-report table name is confirmed,
+    // gate this enqueue on doc-existence to avoid sending "ready" for bookings
+    // with no document. For MVP, conservatively enqueue only if a hook has
+    // already inserted a doc_ready row — i.e. skip this loop entirely until
+    // the doc table is integrated. Leaving the structure in place.
+    void bookingId;
+    enqueued += 0;
+  }
+
+  return { enqueued };
 }
