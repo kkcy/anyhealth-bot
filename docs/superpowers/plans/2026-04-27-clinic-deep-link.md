@@ -743,7 +743,7 @@ main().catch((e) => {
 
 - [ ] **Step 3: Run the script**
 
-Ensure `.env` has `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Then:
+Ensure `.env` has `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. Then:
 
 ```bash
 bun run test:deep-link
