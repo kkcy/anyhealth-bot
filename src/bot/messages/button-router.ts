@@ -40,6 +40,38 @@ export async function handleButtonAction(
     replyText: (text: string) => Promise<void>;
   },
 ): Promise<HandleResult> {
+  // Auto-lookup user if state is fresh/stale
+  if (!ctx.thread.userId) {
+    const sb = getSupabase();
+    const { data: user } = await sb
+      .from("whatsapp_users")
+      .select("id, language")
+      .or(`whatsapp_number.eq.${ctx.phone},whatsapp_number.eq.+${ctx.phone}`)
+      .maybeSingle();
+
+    if (user) {
+      const { data: patients } = await sb
+        .from("patient_id")
+        .select("id, patient_name, ic_passport")
+        .eq("wa_user_id", user.id);
+
+      const patientRefs = (patients ?? []).map((p) => ({
+        id: p.id,
+        name: p.patient_name,
+        ic: p.ic_passport ?? "",
+      }));
+
+      await ctx.updateThread({
+        userId: user.id,
+        patients: patientRefs,
+        activePatientId: patientRefs.length === 1 ? patientRefs[0].id : undefined,
+        language: user.language ?? undefined,
+      });
+      // Refresh local state object for the remainder of this function
+      ctx.thread.userId = user.id;
+    }
+  }
+
   switch (action.kind) {
     case "mute_clinic": {
       await muteClinic(ctx.phone, action.clinicId, "button");
@@ -57,7 +89,7 @@ export async function handleButtonAction(
     }
     case "view_booking": {
       await ctx.updateThread({ activeBookingId: action.bookingId });
-      return { handled: false, hint: `User tapped "View booking" for booking ${action.bookingId}. Load the booking and summarise it.` };
+      return { handled: false, hint: `User tapped "View booking" for booking ${action.bookingId}. Call get_booking_details to load it and summarise it for the user.` };
     }
     case "get_doc": {
       await ctx.updateThread({ pendingDocRetrievalBookingId: action.bookingId });

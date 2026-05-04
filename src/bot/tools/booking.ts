@@ -487,5 +487,57 @@ export function createBookingTools(
         });
       },
     }),
+
+    get_booking_details: tool({
+      description: "Get detailed information about a specific booking by its ID.",
+      inputSchema: z.object({
+        bookingId: z.string().describe("The UUID of the booking to retrieve"),
+      }),
+      execute: async ({ bookingId }) => {
+        if (!state.userId) {
+          return JSON.stringify({ error: "Please start a conversation first." });
+        }
+
+        const { data: b, error } = await supabase
+          .from("c_s_bookings")
+          .select(`
+            id, original_date, original_time, new_date, new_time, status, details, address,
+            booking_type, duration_minutes,
+            doctor:doctor_id(id, name, clinic_id),
+            service:service_id(id, service_name, category)
+          `)
+          .eq("id", bookingId)
+          .eq("user_id", state.userId)
+          .maybeSingle();
+
+        if (error || !b) {
+          return JSON.stringify({ error: "Booking not found or does not belong to you." });
+        }
+
+        const doctor = b.doctor as any;
+        let clinicName = null;
+        if (doctor?.clinic_id) {
+          const { data: clinic } = await supabase
+            .from("c_a_clinics")
+            .select("name")
+            .eq("id", doctor.clinic_id)
+            .maybeSingle();
+          clinicName = clinic?.name ?? null;
+        }
+
+        return JSON.stringify({
+          bookingId: b.id,
+          date: b.new_date ?? b.original_date,
+          time: b.new_time ?? b.original_time,
+          status: b.status,
+          type: b.booking_type,
+          service: b.service,
+          doctorName: doctor?.name ?? null,
+          clinicName,
+          details: b.details,
+          address: b.address,
+        });
+      },
+    }),
   };
 }

@@ -11,6 +11,7 @@ import { stepCountIs } from "ai";
 import { parseDeepLinkToken, parseFriendlyPrefill, applyDeepLink } from "./deep-link";
 import { resolveClinicBySlug, resolveClinicByName } from "./clinic-resolver";
 import { sendWelcome } from "./messages/welcome";
+import { parseButtonPayload, handleButtonAction } from "./messages/button-router";
 
 let _bot: ReturnType<typeof createBot> | null = null;
 
@@ -182,6 +183,19 @@ function mapInteractiveReplyToText(
   }
   if (replyId === "booking_confirm_no") {
     return "I want to change my booking details.";
+  }
+
+  if (replyId.startsWith("view_booking:")) {
+    const id = replyId.split(":")[1];
+    return `I'd like to see the details for booking ${id}. Please call get_booking_details.`;
+  }
+  if (replyId.startsWith("get_doc:")) {
+    const id = replyId.split(":")[1];
+    return `I'd like to get the documents for booking ${id}.`;
+  }
+  if (replyId.startsWith("mute_clinic:")) {
+    const id = replyId.split(":")[1];
+    return `I want to mute reminders for clinic ${id}.`;
   }
 
   const namedPick = (
@@ -632,6 +646,27 @@ export async function handleMessage(thread: any, message: any) {
   // --- end deep-link routing ---
 
   const incomingText: string = String(activeMessage?.text?.body ?? activeMessage?.text ?? "");
+  const extraSystemNotes: string[] = [];
+
+  // --- Button Routing ---
+  const buttonAction = parseButtonPayload(incomingText);
+  if (buttonAction) {
+    const result = await handleButtonAction(buttonAction, {
+      phone,
+      thread: state,
+      updateThread: updateState,
+      replyText: async (t) => {
+        await thread.post(t);
+      },
+    });
+    if (result.handled) {
+      return; // Turn ends
+    }
+    if (result.hint) {
+      extraSystemNotes.push(result.hint);
+    }
+  }
+
   const isInteractiveClick = !!extractInteractiveReplyId(activeMessage);
   const incomingLocation = extractLocation(activeMessage);
   if (incomingLocation) {
@@ -691,7 +726,7 @@ export async function handleMessage(thread: any, message: any) {
     });
   }
 
-  const systemPrompt = buildSystemPrompt(state);
+  const systemPrompt = buildSystemPrompt(state, extraSystemNotes);
 
   // Cap session messages to prevent token overflow
   const MAX_SESSION_MESSAGES = 50;

@@ -248,8 +248,8 @@ export interface TemplateComponent {
   sub_type?: "quick_reply" | "url";
   index?: string;
   parameters?: Array<
-    | { type: "text"; text: string }
-    | { type: "payload"; payload: string }
+    | { type: "text"; text: string; parameter_name?: string }
+    | { type: "payload"; payload: string; parameter_name?: string }
   >;
 }
 

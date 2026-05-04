@@ -41,22 +41,35 @@ interface BuildArgs {
 
 export function buildComponents(args: BuildArgs): TemplateComponent[] {
   const v = args.template_vars;
-  let bodyParams: string[];
+  let bodyParams: Array<{ text: string; name: string }>;
   let primaryPayload: string;
 
   switch (args.template_name) {
     case "appt_24h_with_doctor":
     case "appt_2h_with_doctor":
-      bodyParams = [v.patient_name, v.clinic_name, v.time_string, v.doctor_name];
+      bodyParams = [
+        { text: v.patient_name, name: "patient_name" },
+        { text: v.clinic_name, name: "clinic_name" },
+        { text: v.time_string, name: "time_string" },
+        { text: v.doctor_name, name: "doctor_name" },
+      ];
       primaryPayload = `view_booking:${args.booking_id}`;
       break;
     case "appt_24h_no_doctor":
     case "appt_2h_no_doctor":
-      bodyParams = [v.patient_name, v.clinic_name, v.time_string];
+      bodyParams = [
+        { text: v.patient_name, name: "patient_name" },
+        { text: v.clinic_name, name: "clinic_name" },
+        { text: v.time_string, name: "time_string" },
+      ];
       primaryPayload = `view_booking:${args.booking_id}`;
       break;
     case "doc_ready":
-      bodyParams = [v.patient_name, v.doc_type, v.clinic_name];
+      bodyParams = [
+        { text: v.patient_name, name: "patient_name" },
+        { text: v.doc_type, name: "doc_type" },
+        { text: v.clinic_name, name: "clinic_name" },
+      ];
       primaryPayload = `get_doc:${args.booking_id}`;
       break;
     default:
@@ -66,7 +79,11 @@ export function buildComponents(args: BuildArgs): TemplateComponent[] {
   return [
     {
       type: "body",
-      parameters: bodyParams.map((t) => ({ type: "text", text: t })),
+      parameters: bodyParams.map((p) => ({
+        type: "text",
+        text: p.text,
+        parameter_name: p.name,
+      })),
     },
     {
       type: "button",

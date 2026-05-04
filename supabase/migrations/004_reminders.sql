@@ -32,8 +32,7 @@ CREATE INDEX IF NOT EXISTS reminder_jobs_booking_idx
 
 -- (booking_id, kind) is unique per pending row to defend against double-enqueue races.
 CREATE UNIQUE INDEX IF NOT EXISTS reminder_jobs_pending_unique
-  ON reminder_jobs (booking_id, kind)
-  WHERE sent_at IS NULL AND failed_at IS NULL;
+  ON reminder_jobs (booking_id, kind);
 
 
 CREATE TABLE IF NOT EXISTS reminder_optouts (
