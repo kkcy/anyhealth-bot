@@ -67,4 +67,10 @@ export interface ThreadState {
 
   // Deep-link routing — one-shot, cleared at end of turn.
   unknownSlugThisTurn?: boolean;
+
+  /** Set when user taps "View booking" on a reminder template. Cleared next non-button turn. */
+  activeBookingId?: string;
+
+  /** Set when user taps "Get document" on a doc-ready reminder. Cleared next non-button turn. */
+  pendingDocRetrievalBookingId?: string;
 }
