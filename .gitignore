@@ -7,3 +7,5 @@ next-env.d.ts
 
 # Local git worktrees (created by superpowers workflow)
 .worktrees/
+
+.DS_STOREscratch/
