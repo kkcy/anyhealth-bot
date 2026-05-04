@@ -5,6 +5,13 @@ import { createTools } from "../src/bot/tools";
 import type { PatientRef, ThreadState } from "../src/types";
 import { stepCountIs } from "ai";
 import { validateEnv } from "../src/lib/env";
+import { getSupabase } from "../src/lib/supabase";
+import {
+  cleanupSmokeBookings,
+  createSmokeRunId,
+  type SmokeCleanupResult,
+  wrapSmokeBookingTool,
+} from "./smoke-cleanup";
 
 type TurnContext = {
   state: ThreadState;
@@ -27,11 +34,13 @@ type TurnSpec = {
   shouldRun?: (ctx: TurnContext) => boolean;
   requireAllTools?: string[];
   requireAnyTools?: string[];
+  forbidTools?: string[];
   requireToolArgs?: ToolArgRule[] | ((ctx: TurnContext) => ToolArgRule[]);
 };
 
 type SmokeCase = {
   id: string;
+  requireCreatedBooking?: boolean;
   turns: TurnSpec[];
 };
 
@@ -39,6 +48,7 @@ type CliOptions = {
   phone: string;
   fullReply: boolean;
   caseIds: string[];
+  keepBookings: boolean;
   profileName?: string;
   patientName?: string;
   patientIndex?: number;
@@ -71,6 +81,7 @@ type CaseResult = {
   failures: string[];
   allTools: string[];
   turns: TurnResult[];
+  cleanup?: SmokeCleanupResult & { runId: string };
 };
 
 const DEFAULT_PHONE = process.env.SMOKE_PHONE ?? "60123456789";
@@ -270,11 +281,13 @@ function buildCases(options: CliOptions): SmokeCase[] {
   return [
     {
       id: "booking-flow",
+      requireCreatedBooking: true,
       turns: [
         {
           id: "booking-intent",
-          message: "Hi, I want to book a checkup tomorrow at 3pm.",
+          message: "Hi, I want to book a consultation tomorrow at 3pm. I have a fever.",
           requireAllTools: ["user_lookup"],
+          forbidTools: ["create_booking"],
         },
         {
           id: "booking-select-patient",
@@ -283,31 +296,36 @@ function buildCases(options: CliOptions): SmokeCase[] {
             const { index, patient } = resolvePreferredPatient(ctx);
             return `I choose patient ${index}, ${patient.name}.`;
           },
+          forbidTools: ["create_booking"],
         },
         {
           id: "booking-search-services",
           shouldRun: (ctx) => !ctx.allToolCalls.includes("search_services"),
-          message: "Please help me book a checkup tomorrow at 3pm.",
+          message: "Please help me book a consultation tomorrow at 3pm for fever.",
           requireAllTools: ["search_services"],
+          forbidTools: ["create_booking"],
         },
         {
           id: "choose-clinic",
           message: (ctx) => {
             const index = chooseClinicIndexForBooking(ctx.state);
-            return `I choose clinic ${index}.`;
+            return `I choose clinic ${index}. Please call select_clinic with index ${index}. Do not select a service yet.`;
           },
           requireAllTools: ["select_clinic"],
+          forbidTools: ["create_booking", "select_service"],
         },
         {
           id: "choose-service",
-          message: "I choose service 1 and method 1 if needed.",
-          requireAllTools: ["select_service"],
+          message: "I choose service 1 and method 1. Please select that service and method, but do not create the booking yet.",
+          requireAnyTools: ["select_service", "get_clinic_availability"],
+          forbidTools: ["create_booking"],
         },
         {
           id: "doctor-options",
           shouldRun: (ctx) => clinicRequiresDoctorSelection(ctx.state) && !ctx.state.activeDoctorId,
           message: "Please show available doctors.",
           requireAllTools: ["get_clinic_doctors"],
+          forbidTools: ["create_booking"],
         },
         {
           id: "choose-doctor",
@@ -315,8 +333,18 @@ function buildCases(options: CliOptions): SmokeCase[] {
             clinicRequiresDoctorSelection(ctx.state) &&
             !ctx.state.activeDoctorId &&
             (ctx.state.doctorOptions?.length ?? 0) > 1,
-          message: "I choose doctor 1.",
+          message: "I choose doctor 1. Please select that doctor, but do not create the booking yet.",
+          forbidTools: ["create_booking"],
+        },
+        {
+          id: "ensure-doctor-selected",
+          shouldRun: (ctx) =>
+            clinicRequiresDoctorSelection(ctx.state) &&
+            !ctx.state.activeDoctorId &&
+            (ctx.state.doctorOptions?.length ?? 0) > 1,
+          message: "Please call only select_doctor with index 1 now. Do not create the booking yet.",
           requireAllTools: ["select_doctor"],
+          forbidTools: ["create_booking"],
         },
         {
           id: "new-patient-flag",
@@ -475,6 +503,7 @@ function parseCliArgs(): CliOptions {
   const args = process.argv.slice(2);
   let phone = DEFAULT_PHONE;
   let fullReply = false;
+  let keepBookings = process.env.SMOKE_KEEP_BOOKINGS === "1";
   let profileName = process.env.SMOKE_PROFILE?.trim() || undefined;
   let patientName = process.env.SMOKE_PATIENT_NAME?.trim() || undefined;
   let patientIndex = process.env.SMOKE_PATIENT_INDEX ? Number(process.env.SMOKE_PATIENT_INDEX) : undefined;
@@ -492,6 +521,10 @@ function parseCliArgs(): CliOptions {
   for (const arg of args) {
     if (arg === "--full-reply") {
       fullReply = true;
+      continue;
+    }
+    if (arg === "--keep-smoke-bookings") {
+      keepBookings = true;
       continue;
     }
     if (arg.startsWith("--case=")) {
@@ -585,6 +618,7 @@ function parseCliArgs(): CliOptions {
     phone,
     fullReply,
     caseIds,
+    keepBookings,
     profileName,
     patientName,
     patientIndex,
@@ -629,6 +663,7 @@ function evaluateTurnRequirements(
   const failures: string[] = [];
   const requiredAll = turn.requireAllTools ?? [];
   const requiredAny = turn.requireAnyTools ?? [];
+  const forbidden = turn.forbidTools ?? [];
 
   const missing = requiredAll.filter((tool) => !calledTools.includes(tool));
   if (missing.length > 0) {
@@ -637,6 +672,11 @@ function evaluateTurnRequirements(
 
   if (requiredAny.length > 0 && !requiredAny.some((tool) => calledTools.includes(tool))) {
     failures.push(`Expected one of tools: ${requiredAny.join(", ")}`);
+  }
+
+  const forbiddenCalled = forbidden.filter((tool) => calledTools.includes(tool));
+  if (forbiddenCalled.length > 0) {
+    failures.push(`Forbidden tools called: ${forbiddenCalled.join(", ")}`);
   }
 
   for (const rule of requiredToolArgs) {
@@ -672,35 +712,67 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
     verified: false,
     verifyAttempts: 0,
   };
+  const smokeRunId = createSmokeRunId(testCase.id);
+  const createdBookingIds: string[] = [];
+  let cleanup: (SmokeCleanupResult & { runId: string }) | undefined;
 
   const updateState = async (partial: Partial<ThreadState>) => {
     Object.assign(state, partial);
   };
 
-  const tools = createTools(state, updateState);
+  const tools = options.keepBookings
+    ? createTools(state, updateState)
+    : wrapSmokeBookingTool(createTools(state, updateState), smokeRunId, createdBookingIds);
   const history: Array<{ role: "user" | "assistant"; content: string }> = [];
   const allToolCalls: string[] = [];
   const turns: TurnResult[] = [];
   const caseFailures: string[] = [];
 
-  for (const turn of testCase.turns) {
-    const ctx: TurnContext = {
-      state,
-      options,
-      allToolCalls: [...allToolCalls],
-      turnResults: [...turns],
-      history: [...history],
-    };
+  try {
+    for (const turn of testCase.turns) {
+      const ctx: TurnContext = {
+        state,
+        options,
+        allToolCalls: [...allToolCalls],
+        turnResults: [...turns],
+        history: [...history],
+      };
 
-    let shouldRun = true;
-    if (turn.shouldRun) {
+      let shouldRun = true;
+      if (turn.shouldRun) {
+        try {
+          shouldRun = turn.shouldRun(ctx);
+        } catch (err) {
+          const failure = err instanceof Error ? err.message : String(err);
+          turns.push({
+            id: turn.id,
+            message: "(failed to evaluate shouldRun)",
+            reply: "",
+            tools: [],
+            toolCalls: [],
+            failures: [failure],
+          });
+          caseFailures.push(`[${turn.id}] ${failure}`);
+          break;
+        }
+      }
+      if (!shouldRun) {
+        continue;
+      }
+
+      let message: string;
+      let requiredToolArgs: ToolArgRule[] = [];
       try {
-        shouldRun = turn.shouldRun(ctx);
+        message = typeof turn.message === "function" ? turn.message(ctx) : turn.message;
+        requiredToolArgs =
+          typeof turn.requireToolArgs === "function"
+            ? turn.requireToolArgs(ctx)
+            : (turn.requireToolArgs ?? []);
       } catch (err) {
         const failure = err instanceof Error ? err.message : String(err);
         turns.push({
           id: turn.id,
-          message: "(failed to evaluate shouldRun)",
+          message: "(failed to generate message)",
           reply: "",
           tools: [],
           toolCalls: [],
@@ -709,65 +781,54 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
         caseFailures.push(`[${turn.id}] ${failure}`);
         break;
       }
-    }
-    if (!shouldRun) {
-      continue;
-    }
 
-    let message: string;
-    let requiredToolArgs: ToolArgRule[] = [];
-    try {
-      message = typeof turn.message === "function" ? turn.message(ctx) : turn.message;
-      requiredToolArgs =
-        typeof turn.requireToolArgs === "function"
-          ? turn.requireToolArgs(ctx)
-          : (turn.requireToolArgs ?? []);
-    } catch (err) {
-      const failure = err instanceof Error ? err.message : String(err);
+      const result = await generateText({
+        system: buildSystemPrompt(state),
+        tools,
+        stopWhen: stepCountIs(12),
+        messages: [...history, { role: "user", content: message }],
+      });
+
+      const toolCalls = collectToolCalls(result);
+      const calledTools = Array.from(new Set(toolCalls.map((c) => c.toolName)));
+      const reply = (result.text ?? "").trim();
+      const failures = evaluateTurnRequirements(turn, calledTools, toolCalls, requiredToolArgs);
+      if (!reply) failures.push("No assistant text response");
+
       turns.push({
         id: turn.id,
-        message: "(failed to generate message)",
-        reply: "",
-        tools: [],
-        toolCalls: [],
-        failures: [failure],
+        message,
+        reply,
+        tools: calledTools,
+        toolCalls,
+        failures,
       });
-      caseFailures.push(`[${turn.id}] ${failure}`);
-      break;
-    }
 
-    const result = await generateText({
-      system: buildSystemPrompt(state),
-      tools,
-      stopWhen: stepCountIs(12),
-      messages: [...history, { role: "user", content: message }],
-    });
+      allToolCalls.push(...calledTools);
+      history.push({ role: "user", content: message });
+      if (reply) history.push({ role: "assistant", content: reply });
 
-    const toolCalls = collectToolCalls(result);
-    const calledTools = Array.from(new Set(toolCalls.map((c) => c.toolName)));
-    const reply = (result.text ?? "").trim();
-    const failures = evaluateTurnRequirements(turn, calledTools, toolCalls, requiredToolArgs);
-    if (!reply) failures.push("No assistant text response");
-
-    turns.push({
-      id: turn.id,
-      message,
-      reply,
-      tools: calledTools,
-      toolCalls,
-      failures,
-    });
-
-    allToolCalls.push(...calledTools);
-    history.push({ role: "user", content: message });
-    if (reply) history.push({ role: "assistant", content: reply });
-
-    if (failures.length > 0) {
-      for (const failure of failures) {
-        caseFailures.push(`[${turn.id}] ${failure}`);
+      if (failures.length > 0) {
+        for (const failure of failures) {
+          caseFailures.push(`[${turn.id}] ${failure}`);
+        }
+        break;
       }
-      break;
     }
+  } finally {
+    if (!options.keepBookings) {
+      cleanup = {
+        runId: smokeRunId,
+        ...(await cleanupSmokeBookings(getSupabase(), smokeRunId, createdBookingIds)),
+      };
+      for (const error of cleanup.errors) {
+        caseFailures.push(`[cleanup] ${error}`);
+      }
+    }
+  }
+
+  if (testCase.requireCreatedBooking && createdBookingIds.length === 0) {
+    caseFailures.push("[case] Expected smoke flow to create a booking, but no booking id was returned.");
   }
 
   return {
@@ -776,6 +837,7 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
     failures: caseFailures,
     allTools: Array.from(new Set(allToolCalls)),
     turns,
+    cleanup,
   };
 }
 
@@ -822,6 +884,7 @@ async function main() {
     console.log(`Document filters: ${filters}`);
   }
   console.log(`Full replies: ${options.fullReply ? "ON" : "OFF"}`);
+  console.log(`Smoke booking cleanup: ${options.keepBookings ? "OFF" : "ON"}`);
   console.log(`Cases: ${selectedCases.map((c) => c.id).join(", ")}`);
   console.log("");
 
@@ -850,6 +913,13 @@ async function main() {
     const status = r.passed ? "PASS" : "FAIL";
     console.log(`[${status}] ${r.id}`);
     console.log(`  Tools used: ${r.allTools.length > 0 ? r.allTools.join(", ") : "(none)"}`);
+    if (r.cleanup) {
+      console.log(
+        `  Cleanup: run=${r.cleanup.runId}, ids=${r.cleanup.deletedById}, marker=${
+          r.cleanup.deletedByMarker ? "ok" : "failed"
+        }`
+      );
+    }
 
     for (const t of r.turns) {
       console.log(`  Turn ${t.id}`);
