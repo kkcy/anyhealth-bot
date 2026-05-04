@@ -9,3 +9,5 @@ next-env.d.ts
 .worktrees/
 
 .DS_STOREscratch/
+
+scratch/
