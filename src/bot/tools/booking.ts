@@ -27,6 +27,27 @@ function hasOverlap(startA: number, durationA: number, startB: number, durationB
   return startA < endB && startB < endA;
 }
 
+type ServiceInfoForBooking = {
+  id: string;
+  price: number | null;
+  duration: number | null;
+  reminder_remark: string | null;
+  doctor_id: string | null;
+  method_id: string | null;
+  service: { id: string; clinic_id: string; service_name: string; description?: string | null } | null;
+  doctor: { id: string; name: string; clinic_id: string } | null;
+  method: { id: string; method: string; time_required: number | boolean | null; address_required: boolean | null } | null;
+};
+
+function serviceInfoSelect() {
+  return `
+    id, price, duration, reminder_remark, doctor_id, method_id,
+    service:service_id(id, clinic_id, service_name, description),
+    doctor:doctor_id(id, name, clinic_id),
+    method:method_id(id, method, time_required, address_required)
+  `;
+}
+
 export function createBookingTools(
   state: ThreadState,
   updateState: (partial: Partial<ThreadState>) => Promise<void>
@@ -109,7 +130,7 @@ export function createBookingTools(
         }
 
         const { data: clinicDoctors, error: doctorLoadError } = await supabase
-          .from("c_a_doctors")
+          .from("c_a_doctor")
           .select("id, name")
           .eq("clinic_id", clinicId)
           .order("name", { ascending: true });
@@ -126,8 +147,8 @@ export function createBookingTools(
           return JSON.stringify({ error: "Selected doctor does not belong to the selected clinic." });
         }
 
-        if (!doctorId) {
-          if (clinicDoctorSelection && doctors.length > 1) {
+        if (!doctorId && clinicDoctorSelection) {
+          if (doctors.length > 1) {
             return JSON.stringify({
               error: "This clinic requires doctor selection. Call select_doctor first.",
               doctors: doctors.map((d, i) => ({ index: i + 1, name: d.name })),
@@ -143,42 +164,40 @@ export function createBookingTools(
           return JSON.stringify({ error: "Patient not found in state." });
         }
 
-        // Get service duration
-        let { data: service } = await supabase
-          .from("c_a_clinic_service")
-          .select("service_name, duration_minutes")
-          .eq("id", serviceId)
-          .maybeSingle();
+        let serviceInfoQuery = supabase
+          .from("c_a_service_info")
+          .select(serviceInfoSelect())
+          .eq("service_id", serviceId);
+        if (methodId) serviceInfoQuery = serviceInfoQuery.eq("method_id", methodId);
+        if (doctorId) serviceInfoQuery = serviceInfoQuery.eq("doctor_id", doctorId);
 
-        if (!service) {
-          ({ data: service } = await supabase
-            .from("tcm_a_clinic_service")
-            .select("service_name, duration_minutes")
-            .eq("id", serviceId)
-            .maybeSingle());
+        const { data: serviceInfoRows, error: serviceInfoError } = await serviceInfoQuery;
+        if (serviceInfoError) {
+          return JSON.stringify({ error: "Failed to load service details", detail: serviceInfoError.message });
+        }
+        const matchingInfos = ((serviceInfoRows ?? []) as unknown as ServiceInfoForBooking[])
+          .filter((info) => info.service?.clinic_id === clinicId);
+        const serviceInfo = matchingInfos[0];
+        if (!serviceInfo) {
+          return JSON.stringify({ error: "Selected service is not available at this clinic." });
         }
 
-        // Validate conditional fields
-        if (methodId) {
-          const { data: method } = await supabase
-            .from("c_a_service_method")
-            .select("priority, address")
-            .eq("id", methodId)
-            .maybeSingle();
-
-          if (method?.priority && !time) {
-            return JSON.stringify({ error: "This service method requires a time. Please provide a time in HH:mm format." });
-          }
-          if (method?.address && !address) {
-            return JSON.stringify({ error: "This service method requires an address (e.g., for house calls). Please provide a location." });
-          }
+        const selectedMethod = serviceInfo.method;
+        if (selectedMethod?.time_required && !time) {
+          return JSON.stringify({ error: "This service method requires a time. Please provide a time in HH:mm format." });
         }
+        if (selectedMethod?.address_required && !address) {
+          return JSON.stringify({ error: "This service method requires an address. Please provide a location." });
+        }
+
+        doctorId = serviceInfo.doctor_id ?? doctorId;
+        methodId = serviceInfo.method_id ?? methodId;
 
         if (!doctorId) {
           return JSON.stringify({ error: "No doctor selected. Call select_doctor first." });
         }
 
-        const appointmentDuration = service?.duration_minutes ?? 30;
+        const appointmentDuration = serviceInfo.duration ?? 30;
         const finalReminderRemark = (reminderRemark ?? details)?.trim() || null;
 
         if (newPatientLimit !== null && isNewPatient === undefined) {
@@ -200,14 +219,14 @@ export function createBookingTools(
             return JSON.stringify({ error: "Invalid time format. Please provide time in HH:mm format." });
           }
 
-          const clinicDoctorIds = doctors.map((d) => d.id);
           const { data: existingNewPatientBookings, error: existingError } = await supabase
             .from("c_s_bookings")
-            .select("id, doctor_id, original_time, new_time, duration_minutes")
-            .or(`original_date.eq.${date},new_date.eq.${date}`)
-            .not("status", "in", "(cancelled,declined)")
-            .eq("new_patient", true)
-            .in("doctor_id", clinicDoctorIds);
+            .select(`
+              id, original_time, reschedule_time, status,
+              service_info:service_info_id(duration, doctor_id)
+            `)
+            .or(`original_date.eq.${date},reschedule_date.eq.${date}`)
+            .not("status", "in", "(cancelled,declined)");
           if (existingError) {
             return JSON.stringify({
               error: "Failed to validate new-patient slot limit",
@@ -217,12 +236,12 @@ export function createBookingTools(
 
           let overlappingNewPatientCount = 0;
           for (const booking of existingNewPatientBookings ?? []) {
-            const slotTime = booking.new_time ?? booking.original_time;
+            const info = (booking as any).service_info;
+            if (info?.doctor_id !== doctorId) continue;
+            const slotTime = (booking as any).reschedule_time ?? booking.original_time;
             const bookingStart = slotTime ? parseTimeToMinutes(slotTime) : null;
             if (bookingStart === null) continue;
-            const bookingDuration = booking.duration_minutes && booking.duration_minutes > 0
-              ? booking.duration_minutes
-              : 30;
+            const bookingDuration = info?.duration && info.duration > 0 ? info.duration : 30;
             if (hasOverlap(requestedStart, appointmentDuration, bookingStart, bookingDuration)) {
               overlappingNewPatientCount += 1;
             }
@@ -238,24 +257,19 @@ export function createBookingTools(
         }
 
         const payload = {
-          user_id: state.userId,
-          doctor_id: doctorId,
-          service_id: serviceId,
-          booking_type: bookingType,
-          details: finalReminderRemark,
+          wa_user_id: state.userId,
+          service_info_id: serviceInfo.id,
+          remark: finalReminderRemark,
           original_date: date,
           original_time: time ?? "00:00",
           status: "pending",
-          duration_minutes: appointmentDuration,
-          method_id: methodId || null,
           address: address?.trim() || null,
-          new_patient: finalIsNewPatient,
         };
 
         const { data: booking, error } = await supabase
           .from("c_s_bookings")
           .insert(payload)
-          .select("id, original_date, original_time, status, details, new_patient")
+          .select("id, original_date, original_time, status, remark")
           .single();
 
         if (error) {
@@ -264,7 +278,7 @@ export function createBookingTools(
 
         // Fetch doctor and clinic names for confirmation
         const [{ data: doctor }, { data: clinic }] = await Promise.all([
-          supabase.from("c_a_doctors").select("name").eq("id", doctorId).maybeSingle(),
+          supabase.from("c_a_doctor").select("name").eq("id", doctorId).maybeSingle(),
           supabase.from("c_a_clinics").select("name, address").eq("id", clinicId).maybeSingle(),
         ]);
 
@@ -291,10 +305,10 @@ export function createBookingTools(
           date: booking.original_date,
           time: booking.original_time,
           status: booking.status,
-          isNewPatient: booking.new_patient,
-          reminderRemark: booking.details,
+          isNewPatient: finalIsNewPatient,
+          reminderRemark: booking.remark,
           patientName: patient.name,
-          serviceName: service?.service_name ?? null,
+          serviceName: serviceInfo.service?.service_name ?? null,
           doctorName: doctor?.name ?? null,
           clinicName: clinic?.name ?? null,
           clinicAddress: clinic?.address ?? null,
@@ -318,12 +332,15 @@ export function createBookingTools(
         const query = supabase
           .from("c_s_bookings")
           .select(`
-            id, original_date, original_time, new_date, new_time, status, details, address,
-            booking_type, duration_minutes,
-            doctor:doctor_id(id, name, clinic_id),
-            service:service_id(id, service_name, category)
+            id, original_date, original_time, reschedule_date, reschedule_time, status, remark, address,
+            service_info:service_info_id(
+              id, price, duration, reminder_remark,
+              service:service_id(id, clinic_id, service_name, description),
+              doctor:doctor_id(id, name, clinic_id),
+              method:method_id(id, method)
+            )
           `)
-          .eq("user_id", state.userId)
+          .eq("wa_user_id", state.userId)
           .not("status", "in", "(cancelled,declined)")
           .gte("original_date", new Date().toISOString().split("T")[0])
           .order("original_date", { ascending: true })
@@ -342,7 +359,7 @@ export function createBookingTools(
 
         // Fetch clinic names for all bookings
         const clinicIds = [...new Set(
-          bookings.map((b) => (b.doctor as any)?.clinic_id).filter(Boolean)
+          bookings.map((b) => (b.service_info as any)?.service?.clinic_id ?? (b.service_info as any)?.doctor?.clinic_id).filter(Boolean)
         )];
         let clinicMap: Record<string, string> = {};
         if (clinicIds.length > 0) {
@@ -356,18 +373,20 @@ export function createBookingTools(
         }
 
         const results = bookings.map((b) => {
-          const doctor = b.doctor as any;
+          const info = b.service_info as any;
+          const doctor = info?.doctor;
+          const clinicId = info?.service?.clinic_id ?? doctor?.clinic_id;
           return {
             bookingId: b.id,
-            date: b.new_date ?? b.original_date,
-            time: b.new_time ?? b.original_time,
+            date: b.reschedule_date ?? b.original_date,
+            time: b.reschedule_time ?? b.original_time,
             status: b.status,
-            type: b.booking_type,
-            service: b.service,
+            type: info?.method?.method ?? null,
+            service: info?.service,
             doctorName: doctor?.name ?? null,
-            clinicName: doctor?.clinic_id ? clinicMap[doctor.clinic_id] ?? null : null,
-            details: b.details,
-            reminderRemark: b.details,
+            clinicName: clinicId ? clinicMap[clinicId] ?? null : null,
+            details: b.remark,
+            reminderRemark: b.remark,
             address: b.address,
           };
         });
@@ -393,9 +412,9 @@ export function createBookingTools(
         // Verify booking belongs to this user
         const { data: existing, error: fetchError } = await supabase
           .from("c_s_bookings")
-          .select("id, user_id, status, original_date, original_time")
+          .select("id, wa_user_id, status, original_date, original_time")
           .eq("id", bookingId)
-          .eq("user_id", state.userId)
+          .eq("wa_user_id", state.userId)
           .single();
 
         if (fetchError || !existing) {
@@ -407,12 +426,11 @@ export function createBookingTools(
         }
 
         const updatePayload: Record<string, unknown> = {
-          new_date: newDate,
+          reschedule_date: newDate,
           status: "reschedule_pending",
-          updated_at: new Date().toISOString(),
         };
         if (newTime) {
-          updatePayload.new_time = newTime;
+          updatePayload.reschedule_time = newTime;
         }
 
         const { error: updateError } = await supabase
@@ -452,9 +470,9 @@ export function createBookingTools(
 
         const { data: existing, error: fetchError } = await supabase
           .from("c_s_bookings")
-          .select("id, user_id, status")
+          .select("id, wa_user_id, status")
           .eq("id", bookingId)
-          .eq("user_id", state.userId)
+          .eq("wa_user_id", state.userId)
           .single();
 
         if (fetchError || !existing) {
@@ -467,7 +485,7 @@ export function createBookingTools(
 
         const { error: updateError } = await supabase
           .from("c_s_bookings")
-          .update({ status: "cancelled", updated_at: new Date().toISOString() })
+          .update({ status: "cancelled" })
           .eq("id", bookingId);
 
         if (updateError) {
@@ -501,40 +519,45 @@ export function createBookingTools(
         const { data: b, error } = await supabase
           .from("c_s_bookings")
           .select(`
-            id, original_date, original_time, new_date, new_time, status, details, address,
-            booking_type, duration_minutes,
-            doctor:doctor_id(id, name, clinic_id),
-            service:service_id(id, service_name, category)
+            id, original_date, original_time, reschedule_date, reschedule_time, status, remark, address,
+            service_info:service_info_id(
+              id, price, duration, reminder_remark,
+              service:service_id(id, clinic_id, service_name, description),
+              doctor:doctor_id(id, name, clinic_id),
+              method:method_id(id, method)
+            )
           `)
           .eq("id", bookingId)
-          .eq("user_id", state.userId)
+          .eq("wa_user_id", state.userId)
           .maybeSingle();
 
         if (error || !b) {
           return JSON.stringify({ error: "Booking not found or does not belong to you." });
         }
 
-        const doctor = b.doctor as any;
+        const info = b.service_info as any;
+        const doctor = info?.doctor;
         let clinicName = null;
-        if (doctor?.clinic_id) {
+        const clinicId = info?.service?.clinic_id ?? doctor?.clinic_id;
+        if (clinicId) {
           const { data: clinic } = await supabase
             .from("c_a_clinics")
             .select("name")
-            .eq("id", doctor.clinic_id)
+            .eq("id", clinicId)
             .maybeSingle();
           clinicName = clinic?.name ?? null;
         }
 
         return JSON.stringify({
           bookingId: b.id,
-          date: b.new_date ?? b.original_date,
-          time: b.new_time ?? b.original_time,
+          date: b.reschedule_date ?? b.original_date,
+          time: b.reschedule_time ?? b.original_time,
           status: b.status,
-          type: b.booking_type,
-          service: b.service,
+          type: info?.method?.method ?? null,
+          service: info?.service,
           doctorName: doctor?.name ?? null,
           clinicName,
-          details: b.details,
+          details: b.remark,
           address: b.address,
         });
       },

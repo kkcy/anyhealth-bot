@@ -22,6 +22,7 @@ export interface ServiceOption {
   description: string;
   durationMinutes: number;
   price: number | null;
+  reminderRemark?: string;
   methods: MethodOption[];
 }
 

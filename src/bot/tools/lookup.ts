@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
 import type { ThreadState, ClinicOption, ServiceOption, MethodOption, DoctorOption } from "@/types";
 import { haversineKm } from "@/lib/geo";
-import { buildServiceOptions, collectMethodIds, type MethodMap, type RawServiceRow } from "./service-options";
+import { buildServiceOptions, type ServiceInfoRow } from "./service-options";
 
 export function createLookupTools(
   state: ThreadState,
@@ -27,29 +27,14 @@ export function createLookupTools(
   }
 
   async function loadClinicsByIds(clinicIds: string[]) {
-    const selectAttempts = [
-      "id, name, address, doctor_selection, dr_selection, new_patient_limit, latitude, longitude",
-      "id, name, address, doctor_selection, new_patient_limit, latitude, longitude",
-      "id, name, address, doctor_selection, latitude, longitude",
-      // Fallbacks for older schemas without coords (degraded distance ranking)
-      "id, name, address, doctor_selection, dr_selection, new_patient_limit",
-      "id, name, address, doctor_selection, new_patient_limit",
-      "id, name, address, doctor_selection",
-    ];
-
-    let lastError: string | undefined;
-    for (const selectClause of selectAttempts) {
-      const { data, error } = await supabase
-        .from("c_a_clinics")
-        .select(selectClause)
-        .in("id", clinicIds);
-      if (!error && data) {
-        return { data: data as unknown as Record<string, unknown>[], error: undefined };
-      }
-      lastError = error?.message;
-    }
-
-    return { data: [] as Record<string, unknown>[], error: lastError ?? "Failed to load clinics." };
+    const { data, error } = await supabase
+      .from("c_a_clinics")
+      .select("id, name, address, dr_selection")
+      .in("id", clinicIds);
+    return {
+      data: (data ?? []) as unknown as Record<string, unknown>[],
+      error: error?.message,
+    };
   }
 
   // Shared helper: fetch and return services at a specific clinic matching a query
@@ -58,47 +43,38 @@ export function createLookupTools(
       .flatMap((word) => [
         `service_name.ilike.%${word}%`,
         `description.ilike.%${word}%`,
-        `category.ilike.%${word}%`,
       ])
       .join(",");
 
-    const { data: cServices } = await supabase
-      .from("c_a_clinic_service")
-      .select(`
-        id, service_name, description, duration_minutes, price,
-        method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8
-      `)
+    let serviceQuery = supabase
+      .from("c_a_service_list")
+      .select("id")
       .eq("clinic_id", clinic.clinicId)
-      .eq("is_active", true)
-      .or(orConditions)
       .limit(10);
+    if (orConditions) serviceQuery = serviceQuery.or(orConditions);
 
-    const { data: tcmServices } = await supabase
-      .from("tcm_a_clinic_service")
-      .select(`
-        id, service_name, description, duration_minutes, price,
-        method_1, method_2, method_3, method_4, method_5, method_6, method_7, method_8
-      `)
-      .eq("clinic_id", clinic.clinicId)
-      .eq("is_active", true)
-      .or(orConditions)
-      .limit(10);
-
-    const allServices = [...(cServices ?? []), ...(tcmServices ?? [])] as RawServiceRow[];
-
-    const methodIds = collectMethodIds(allServices);
-    let methodMap: MethodMap = {};
-    if (methodIds.length > 0) {
-      const { data: methods } = await supabase
-        .from("c_a_service_method")
-        .select("id, method_name, priority, address")
-        .in("id", methodIds);
-      if (methods) {
-        methodMap = Object.fromEntries(methods.map((m) => [m.id, m]));
-      }
+    const { data: matchingServices, error: serviceError } = await serviceQuery;
+    if (serviceError) {
+      return JSON.stringify({ error: "Failed to load matching services", detail: serviceError.message });
     }
 
-    const serviceOptions: ServiceOption[] = buildServiceOptions(allServices, methodMap);
+    const serviceIds = (matchingServices ?? []).map((s) => s.id).filter(Boolean);
+    let serviceOptions: ServiceOption[] = [];
+    if (serviceIds.length > 0) {
+      const { data: infoRows, error: infoError } = await supabase
+        .from("c_a_service_info")
+        .select(`
+          id, service_id, price, duration, reminder_remark,
+          service:service_id(id, clinic_id, service_name, description),
+          doctor:doctor_id(id, name, clinic_id),
+          method:method_id(id, method, time_required, address_required)
+        `)
+        .in("service_id", serviceIds);
+      if (infoError) {
+        return JSON.stringify({ error: "Failed to load service details", detail: infoError.message });
+      }
+      serviceOptions = buildServiceOptions((infoRows ?? []) as unknown as ServiceInfoRow[]);
+    }
 
     await updateState({ serviceOptions });
 
@@ -135,9 +111,9 @@ export function createLookupTools(
         }
 
         const { data: user, error: userError } = await supabase
-          .from("whatsapp_users")
-          .select("id, user_name, whatsapp_number, language")
-          .or(`whatsapp_number.eq.${state.phone},whatsapp_number.eq.+${state.phone}`)
+          .from("wa_user")
+          .select("id, username, phone_number, language")
+          .or(`phone_number.eq.${state.phone},phone_number.eq.+${state.phone}`)
           .limit(1)
           .maybeSingle();
 
@@ -153,7 +129,7 @@ export function createLookupTools(
         }
 
         const { data: patients, error: patientError } = await supabase
-          .from("patient_id")
+          .from("patient")
           .select("id, patient_name, ic_passport")
           .eq("wa_user_id", user.id);
 
@@ -176,7 +152,7 @@ export function createLookupTools(
 
         return JSON.stringify({
           found: true,
-          userName: user.user_name,
+          userName: user.username,
           language: user.language,
           patients: patientRefs.map((p, i) => ({ index: i + 1, name: p.name, ic: p.ic.slice(-4) })),
           patientCount: patientRefs.length,
@@ -253,29 +229,20 @@ export function createLookupTools(
           .flatMap((word) => [
             `service_name.ilike.%${word}%`,
             `description.ilike.%${word}%`,
-            `category.ilike.%${word}%`,
           ])
           .join(",");
 
-        const { data: cServices, error: cError } = await supabase
-          .from("c_a_clinic_service")
+        const { data: matchingServices, error: serviceError } = await supabase
+          .from("c_a_service_list")
           .select("clinic_id")
-          .eq("is_active", true)
           .or(orConditions)
           .limit(30);
 
-        const { data: tcmServices, error: tcmError } = await supabase
-          .from("tcm_a_clinic_service")
-          .select("clinic_id")
-          .eq("is_active", true)
-          .or(orConditions)
-          .limit(30);
-
-        if (cError || tcmError) {
-          return JSON.stringify({ error: "Failed to search services", detail: cError?.message || tcmError?.message });
+        if (serviceError) {
+          return JSON.stringify({ error: "Failed to search services", detail: serviceError.message });
         }
 
-        const allMatches = [...(cServices ?? []), ...(tcmServices ?? [])];
+        const allMatches = matchingServices ?? [];
         if (allMatches.length === 0) {
           return JSON.stringify({ found: false, message: "No services found matching your description." });
         }
@@ -415,32 +382,23 @@ export function createLookupTools(
           .flatMap((word) => [
             `service_name.ilike.%${word}%`,
             `description.ilike.%${word}%`,
-            `category.ilike.%${word}%`,
           ])
           .join(",");
 
-        const { data: cServices, error: cError } = await supabase
-          .from("c_a_clinic_service")
+        const { data: matchingServices, error: serviceError } = await supabase
+          .from("c_a_service_list")
           .select("clinic_id")
-          .eq("is_active", true)
           .or(orConditions)
           .limit(30);
 
-        const { data: tcmServices, error: tcmError } = await supabase
-          .from("tcm_a_clinic_service")
-          .select("clinic_id")
-          .eq("is_active", true)
-          .or(orConditions)
-          .limit(30);
-
-        if (cError || tcmError) {
+        if (serviceError) {
           return JSON.stringify({
             error: "Failed to search services",
-            detail: cError?.message || tcmError?.message,
+            detail: serviceError.message,
           });
         }
 
-        const allMatches = [...(cServices ?? []), ...(tcmServices ?? [])];
+        const allMatches = matchingServices ?? [];
         if (allMatches.length === 0) {
           return JSON.stringify({
             found: false,
@@ -652,10 +610,36 @@ export function createLookupTools(
           return JSON.stringify({ error: "No clinic selected. Call select_service first." });
         }
 
-        const { data: doctors, error } = await supabase
-          .from("c_a_doctors")
-          .select("id, name")
-          .eq("clinic_id", state.activeClinicId);
+        let doctors: Array<{ id: string; name: string }> = [];
+        let error: { message: string } | null = null;
+        if (state.activeServiceId) {
+          let serviceDoctorQuery = supabase
+            .from("c_a_service_info")
+            .select("doctor:doctor_id(id, name, clinic_id)")
+            .eq("service_id", state.activeServiceId);
+          if (state.activeMethodId) {
+            serviceDoctorQuery = serviceDoctorQuery.eq("method_id", state.activeMethodId);
+          }
+          const { data, error: serviceDoctorError } = await serviceDoctorQuery;
+          error = serviceDoctorError;
+          const seen = new Set<string>();
+          doctors = ((data ?? []) as any[])
+            .map((row) => row.doctor)
+            .filter((doctor) => doctor?.id && doctor.clinic_id === state.activeClinicId)
+            .filter((doctor) => {
+              if (seen.has(doctor.id)) return false;
+              seen.add(doctor.id);
+              return true;
+            })
+            .map((doctor) => ({ id: doctor.id, name: doctor.name }));
+        } else {
+          const { data, error: doctorError } = await supabase
+            .from("c_a_doctor")
+            .select("id, name")
+            .eq("clinic_id", state.activeClinicId);
+          error = doctorError;
+          doctors = data ?? [];
+        }
 
         if (error) {
           return JSON.stringify({ error: "Failed to load doctors", detail: error.message });
@@ -738,7 +722,7 @@ export function createLookupTools(
         const newPatientLimit = clinicOpt?.newPatientLimit ?? null;
 
         const { data: hours, error: hoursError } = await supabase
-          .from("c_a_clinic_available_time")
+          .from("c_a_clinic_time")
           .select("*")
           .eq("clinic_id", clinicId)
           .limit(1)
@@ -749,23 +733,31 @@ export function createLookupTools(
         }
 
         const dayOfWeek = new Date(date).toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
+        const { data: publicHoliday } = await supabase
+          .from("c_a_ph")
+          .select("date")
+          .eq("date", date)
+          .maybeSingle();
+        const dayKey = publicHoliday ? "public_holiday" : dayOfWeek;
 
-        const dayStart = hours[`${dayOfWeek}_start` as keyof typeof hours];
-        const dayEnd = hours[`${dayOfWeek}_end` as keyof typeof hours];
-        const lunchStart = hours[`${dayOfWeek}_lunch_start` as keyof typeof hours];
-        const lunchEnd = hours[`${dayOfWeek}_lunch_end` as keyof typeof hours];
+        const dayStart = hours[`${dayKey}_start${publicHoliday ? "" : "_time"}` as keyof typeof hours];
+        const dayEnd = hours[`${dayKey}_end${publicHoliday ? "" : "_time"}` as keyof typeof hours];
+        const breaks = Array.from({ length: 5 }, (_, i) => {
+          const n = i + 1;
+          const prefix = publicHoliday ? "ph" : dayOfWeek;
+          const start = hours[`${prefix}_break${n}_start` as keyof typeof hours];
+          const end = hours[`${prefix}_break${n}_end` as keyof typeof hours];
+          return start && end ? { start, end } : null;
+        }).filter(Boolean);
+        const lunchStart = (breaks[0] as any)?.start;
+        const lunchEnd = (breaks[0] as any)?.end;
 
         if (!dayStart || !dayEnd) {
           return JSON.stringify({ open: false, message: `Clinic is closed on ${dayOfWeek}s.` });
         }
 
-        const holidays: string[] = hours.holiday_self_declared ?? [];
-        if (holidays.includes(date)) {
-          return JSON.stringify({ open: false, message: "Clinic is closed on this date (holiday)." });
-        }
-
         const { data: clinicDoctors, error: doctorError } = await supabase
-          .from("c_a_doctors")
+          .from("c_a_doctor")
           .select("id")
           .eq("clinic_id", clinicId);
 
@@ -789,31 +781,27 @@ export function createLookupTools(
 
         let bookingQuery = supabase
           .from("c_s_bookings")
-          .select("id, doctor_id, original_time, new_time, status, duration_minutes, new_patient")
-          .or(`original_date.eq.${date},new_date.eq.${date}`)
+          .select(`
+            id, original_time, reschedule_time, status,
+            service_info:service_info_id(duration, doctor_id)
+          `)
+          .or(`original_date.eq.${date},reschedule_date.eq.${date}`)
           .not("status", "in", "(cancelled,declined)");
-
-        if (state.activeDoctorId && clinicDoctorIds.includes(state.activeDoctorId)) {
-          bookingQuery = bookingQuery.eq("doctor_id", state.activeDoctorId);
-        } else {
-          bookingQuery = bookingQuery.in("doctor_id", clinicDoctorIds);
-        }
 
         const { data: bookings } = await bookingQuery;
 
-        const scopedBookings = (bookings ?? []).filter((b) => clinicDoctorIds.includes(b.doctor_id));
+        const scopedBookings = (bookings ?? []).filter((b) => {
+          const info = (b as any).service_info;
+          if (!info?.doctor_id || !clinicDoctorIds.includes(info.doctor_id)) return false;
+          return !state.activeDoctorId || info.doctor_id === state.activeDoctorId;
+        });
 
         const bookedTimes = scopedBookings.map((b) => ({
-          time: b.new_time ?? b.original_time,
-          duration: b.duration_minutes,
+          time: (b as any).reschedule_time ?? b.original_time,
+          duration: ((b as any).service_info?.duration as number | null) ?? 30,
         }));
 
-        const newPatientBookedSlots = scopedBookings
-          .filter((b) => b.new_patient === true)
-          .map((b) => ({
-            time: b.new_time ?? b.original_time,
-            duration: b.duration_minutes,
-          }));
+        const newPatientBookedSlots: Array<{ time: string | null; duration: number }> = [];
 
         const countByStartTime: Record<string, number> = {};
         for (const slot of newPatientBookedSlots) {
@@ -830,9 +818,10 @@ export function createLookupTools(
 
         return JSON.stringify({
           open: true,
-          dayOfWeek,
+          dayOfWeek: publicHoliday ? "public holiday" : dayOfWeek,
           hours: { start: dayStart, end: dayEnd },
           lunch: lunchStart && lunchEnd ? { start: lunchStart, end: lunchEnd } : null,
+          breaks,
           bookedSlots: bookedTimes,
           newPatientLimit,
           newPatientBookedSlots,
