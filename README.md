@@ -60,6 +60,26 @@ Required env: `WHATSAPP_BUSINESS_PHONE` (E.164 without `+`). Optional: `PUBLIC_B
 
 The legacy `clinic_<slug>` text token still works for any links already in the wild.
 
+### Booking Reminders
+
+Confirmed bookings trigger a reminder cascade via WhatsApp Message Templates:
+
+- `appt_24h` — 24h before appointment
+- `appt_2h`  — 2h before appointment
+- `doc_ready` — when a consultation report or MC is ready
+
+All templates are Utility-categorized and include a "Stop Reminders" quick-reply button.
+Per-clinic opt-out is stored in `reminder_optouts`; auto-cleared on rebook (button-source only).
+
+Scheduling is recompute-on-change: any booking write deletes existing pending rows and re-inserts current intent. A `*/5` Vercel Cron sweeps `reminder_jobs` and sends due rows.
+
+Templates submitted to Meta:
+- `appt_24h_with_doctor`, `appt_24h_no_doctor`
+- `appt_2h_with_doctor`, `appt_2h_no_doctor`
+- `doc_ready`
+
+Spec: `docs/superpowers/specs/2026-05-03-booking-reminders-design.md`.
+
 ## Identity Model
 
 One phone number can have multiple patients (e.g., parent managing children's appointments).
@@ -163,11 +183,14 @@ WHATSAPP_BUSINESS_PHONE=         # Dialable E.164 number (no '+'); used in /c/[s
 
 # Database
 SUPABASE_URL=
-SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_SECRET_KEY=
 POSTGRES_URL=                    # Chat SDK thread state (separate from Supabase)
 
 # App
 APP_URL=                         # Vercel deployment URL
+
+# Reminders
+CRON_SECRET=                    # Authenticates Vercel Cron requests to /api/cron/reminders
 ```
 
 ## Postponed Features (Phase 2)
