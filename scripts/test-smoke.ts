@@ -35,6 +35,8 @@ type TurnSpec = {
   requireAllTools?: string[];
   requireAnyTools?: string[];
   forbidTools?: string[];
+  requireReplyContains?: string[];
+  forbidReplyContains?: string[];
   requireToolArgs?: ToolArgRule[] | ((ctx: TurnContext) => ToolArgRule[]);
 };
 
@@ -49,6 +51,7 @@ type CliOptions = {
   fullReply: boolean;
   caseIds: string[];
   keepBookings: boolean;
+  expectNoPatient: boolean;
   profileName?: string;
   patientName?: string;
   patientIndex?: number;
@@ -278,7 +281,7 @@ function buildDocumentSearchMessage(options: CliOptions): string {
 }
 
 function buildCases(options: CliOptions): SmokeCase[] {
-  return [
+  const cases: SmokeCase[] = [
     {
       id: "booking-flow",
       requireCreatedBooking: true,
@@ -497,6 +500,32 @@ function buildCases(options: CliOptions): SmokeCase[] {
       ],
     },
   ];
+
+  if (options.expectNoPatient) {
+    cases.push({
+      id: "booking-no-patient-flow",
+      turns: [
+        {
+          id: "no-patient-intent",
+          message: "Hi, I want to make an appointment tomorrow at 3pm.",
+          requireAllTools: ["user_lookup"],
+          forbidTools: ["create_booking"],
+          requireReplyContains: ["patient"],
+          forbidReplyContains: ["no account found"],
+        },
+        {
+          id: "no-patient-followup",
+          message: "Please help me proceed with booking.",
+          requireAllTools: ["user_lookup"],
+          forbidTools: ["create_booking"],
+          requireReplyContains: ["patient"],
+          forbidReplyContains: ["no account found"],
+        },
+      ],
+    });
+  }
+
+  return cases;
 }
 
 function parseCliArgs(): CliOptions {
@@ -504,6 +533,7 @@ function parseCliArgs(): CliOptions {
   let phone = DEFAULT_PHONE;
   let fullReply = false;
   let keepBookings = process.env.SMOKE_KEEP_BOOKINGS === "1";
+  let expectNoPatient = process.env.SMOKE_EXPECT_NO_PATIENT === "1";
   let profileName = process.env.SMOKE_PROFILE?.trim() || undefined;
   let patientName = process.env.SMOKE_PATIENT_NAME?.trim() || undefined;
   let patientIndex = process.env.SMOKE_PATIENT_INDEX ? Number(process.env.SMOKE_PATIENT_INDEX) : undefined;
@@ -525,6 +555,10 @@ function parseCliArgs(): CliOptions {
     }
     if (arg === "--keep-smoke-bookings") {
       keepBookings = true;
+      continue;
+    }
+    if (arg === "--expect-no-patient") {
+      expectNoPatient = true;
       continue;
     }
     if (arg.startsWith("--case=")) {
@@ -619,6 +653,7 @@ function parseCliArgs(): CliOptions {
     fullReply,
     caseIds,
     keepBookings,
+    expectNoPatient,
     profileName,
     patientName,
     patientIndex,
@@ -657,6 +692,7 @@ function collectToolCalls(result: any): Array<{ toolName: string; args: Record<s
 function evaluateTurnRequirements(
   turn: TurnSpec,
   calledTools: string[],
+  reply: string,
   toolCalls: Array<{ toolName: string; args: Record<string, unknown> }>,
   requiredToolArgs: ToolArgRule[]
 ): string[] {
@@ -664,6 +700,9 @@ function evaluateTurnRequirements(
   const requiredAll = turn.requireAllTools ?? [];
   const requiredAny = turn.requireAnyTools ?? [];
   const forbidden = turn.forbidTools ?? [];
+  const requireReplyContains = turn.requireReplyContains ?? [];
+  const forbidReplyContains = turn.forbidReplyContains ?? [];
+  const normalizedReply = reply.toLowerCase();
 
   const missing = requiredAll.filter((tool) => !calledTools.includes(tool));
   if (missing.length > 0) {
@@ -677,6 +716,18 @@ function evaluateTurnRequirements(
   const forbiddenCalled = forbidden.filter((tool) => calledTools.includes(tool));
   if (forbiddenCalled.length > 0) {
     failures.push(`Forbidden tools called: ${forbiddenCalled.join(", ")}`);
+  }
+
+  for (const phrase of requireReplyContains) {
+    if (!normalizedReply.includes(phrase.toLowerCase())) {
+      failures.push(`Reply missing required phrase: ${phrase}`);
+    }
+  }
+
+  for (const phrase of forbidReplyContains) {
+    if (normalizedReply.includes(phrase.toLowerCase())) {
+      failures.push(`Reply contains forbidden phrase: ${phrase}`);
+    }
   }
 
   for (const rule of requiredToolArgs) {
@@ -792,7 +843,7 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
       const toolCalls = collectToolCalls(result);
       const calledTools = Array.from(new Set(toolCalls.map((c) => c.toolName)));
       const reply = (result.text ?? "").trim();
-      const failures = evaluateTurnRequirements(turn, calledTools, toolCalls, requiredToolArgs);
+      const failures = evaluateTurnRequirements(turn, calledTools, reply, toolCalls, requiredToolArgs);
       if (!reply) failures.push("No assistant text response");
 
       turns.push({

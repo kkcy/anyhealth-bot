@@ -156,6 +156,11 @@ export function createLookupTools(
           language: user.language,
           patients: patientRefs.map((p, i) => ({ index: i + 1, name: p.name, ic: p.ic.slice(-4) })),
           patientCount: patientRefs.length,
+          needsPatientRegistration: patientRefs.length === 0,
+          message:
+            patientRefs.length === 0
+              ? "Account found, but no patient profile is linked yet. Please register patient details at a clinic first."
+              : undefined,
         });
       },
     }),
