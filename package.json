@@ -23,7 +23,8 @@
     "test:reminder-templates": "tsx --tsconfig tsconfig.json scripts/test-reminder-templates.ts",
     "test:reminder-scheduler": "tsx --tsconfig tsconfig.json scripts/test-reminder-scheduler.ts",
     "test:reminder-sender": "tsx --tsconfig tsconfig.json scripts/test-reminder-sender.ts",
-    "test:button-router": "tsx --tsconfig tsconfig.json scripts/test-button-router.ts"
+    "test:button-router": "tsx --tsconfig tsconfig.json scripts/test-button-router.ts",
+    "test:reminders": "bun run test:reminder-time && bun run test:error-classifier && bun run test:reminder-templates && bun run test:reminder-scheduler && bun run test:button-router && bun run test:reminder-optout && bun run test:reminder-sender"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.63",
