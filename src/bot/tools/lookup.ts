@@ -1,9 +1,215 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
+import { GoogleAuth } from "google-auth-library";
 import type { ThreadState, ClinicOption, ServiceOption, MethodOption, DoctorOption } from "@/types";
 import { haversineKm } from "@/lib/geo";
 import { buildServiceOptions, type ServiceInfoRow } from "./service-options";
+
+type ServiceCatalogRow = {
+  id: string;
+  clinic_id: string;
+  service_name: string | null;
+  description: string | null;
+};
+
+type RankedServiceMatch = {
+  row: ServiceCatalogRow;
+  score: number;
+  matchedTerms: string[];
+};
+
+type CachedSearchResult = {
+  clinicOptions: ClinicOption[];
+  topServiceCandidates: Array<{ name: string; clinicId: string }>;
+  matchConfidence: "high" | "medium" | "low";
+  rerankSource: "vertex-ranking-api" | "heuristic";
+  cachedAt: number;
+};
+
+const SEARCH_CACHE_TTL_MS = Number(process.env.SERVICE_SEARCH_CACHE_TTL_MS ?? 12 * 60 * 60 * 1000);
+const SEARCH_CACHE_MAX_ITEMS = Number(process.env.SERVICE_SEARCH_CACHE_MAX_ITEMS ?? 500);
+const serviceSearchCache = new Map<string, CachedSearchResult>();
+
+const TERM_SYNONYMS: Record<string, string[]> = {
+  fever: ["consultation", "general consultation", "doctor consult"],
+  cough: ["consultation", "general consultation"],
+  flu: ["consultation", "general consultation", "influenza test"],
+  cold: ["consultation", "general consultation"],
+  headache: ["consultation", "general consultation"],
+  checkup: ["general consultation", "health screening", "medical check up"],
+  check: ["general consultation", "health screening"],
+  screening: ["health screening", "general consultation"],
+  pain: ["consultation", "general consultation"],
+  sore: ["consultation", "general consultation"],
+  stomach: ["consultation", "general consultation"],
+  diarrhea: ["consultation", "general consultation"],
+  vomiting: ["consultation", "general consultation"],
+  nausea: ["consultation", "general consultation"],
+  dizzy: ["consultation", "general consultation"],
+  allergy: ["consultation", "allergy test"],
+  rash: ["consultation", "dermatology consultation"],
+  vaccine: ["vaccination", "immunisation", "immunization"],
+  shot: ["vaccination", "immunisation", "immunization"],
+  prenatal: ["pregnancy consultation", "antenatal"],
+};
+
+const STOP_WORDS = new Set([
+  "a", "an", "and", "are", "for", "have", "i", "im", "is", "it", "my", "of", "on", "or", "the", "to", "want", "with",
+]);
+
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function makeSearchCacheKey(query: string, language?: string): string {
+  return `v1:${normalizeText(query)}:lang=${(language ?? "unknown").toLowerCase()}`;
+}
+
+function readCachedSearch(key: string): CachedSearchResult | null {
+  const item = serviceSearchCache.get(key);
+  if (!item) return null;
+  if (Date.now() - item.cachedAt > SEARCH_CACHE_TTL_MS) {
+    serviceSearchCache.delete(key);
+    return null;
+  }
+  return item;
+}
+
+function writeCachedSearch(key: string, value: Omit<CachedSearchResult, "cachedAt">) {
+  if (serviceSearchCache.size >= SEARCH_CACHE_MAX_ITEMS) {
+    const oldestKey = serviceSearchCache.keys().next().value;
+    if (oldestKey) serviceSearchCache.delete(oldestKey);
+  }
+  serviceSearchCache.set(key, { ...value, cachedAt: Date.now() });
+}
+
+function extractSearchTerms(query: string): string[] {
+  const normalized = normalizeText(query);
+  if (!normalized) return [];
+  const base = normalized
+    .split(" ")
+    .map((w) => w.trim())
+    .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+
+  const expanded = new Set<string>(base);
+  for (const w of base) {
+    for (const mapped of TERM_SYNONYMS[w] ?? []) {
+      const n = normalizeText(mapped);
+      if (!n) continue;
+      expanded.add(n);
+      for (const chunk of n.split(" ").filter(Boolean)) expanded.add(chunk);
+    }
+  }
+  return Array.from(expanded);
+}
+
+function scoreServiceMatch(row: ServiceCatalogRow, terms: string[], normalizedQuery: string): RankedServiceMatch | null {
+  const name = normalizeText(row.service_name ?? "");
+  const desc = normalizeText(row.description ?? "");
+  const haystack = `${name} ${desc}`.trim();
+  if (!haystack) return null;
+
+  let score = 0;
+  const matchedTerms = new Set<string>();
+  if (normalizedQuery && name.includes(normalizedQuery)) score += 8;
+  if (normalizedQuery && desc.includes(normalizedQuery)) score += 4;
+
+  for (const term of terms) {
+    if (!term) continue;
+    const inName = name.includes(term);
+    const inDesc = desc.includes(term);
+    if (!inName && !inDesc) continue;
+    matchedTerms.add(term);
+    if (inName) score += term.includes(" ") ? 5 : 3;
+    if (inDesc) score += term.includes(" ") ? 3 : 2;
+  }
+
+  if (score <= 0) return null;
+  return { row, score, matchedTerms: Array.from(matchedTerms) };
+}
+
+async function maybeVertexRerank(
+  query: string,
+  ranked: RankedServiceMatch[]
+): Promise<{ ordered: RankedServiceMatch[]; confidence: "high" | "medium" | "low"; reason?: string } | null> {
+  if (process.env.ENABLE_SERVICE_RERANK !== "true") return null;
+  const modelId = process.env.AI_VERTEX_RERANK_MODEL;
+  if (!modelId) return null;
+
+  const top = ranked.slice(0, Number(process.env.SERVICE_RERANK_CANDIDATES ?? 20));
+  if (top.length < 2) return null;
+
+  try {
+    const auth = new GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    });
+    const projectId =
+      process.env.VERTEX_RANKING_PROJECT_ID ||
+      process.env.GOOGLE_CLOUD_PROJECT ||
+      process.env.GCLOUD_PROJECT ||
+      (await auth.getProjectId());
+    if (!projectId) return null;
+    const rankingConfig =
+      process.env.VERTEX_RANKING_CONFIG ||
+      `projects/${projectId}/locations/global/rankingConfigs/default_ranking_config`;
+    const endpoint = `https://discoveryengine.googleapis.com/v1/${rankingConfig}:rank`;
+
+    const client = await auth.getClient();
+    const accessTokenResult = await client.getAccessToken();
+    const accessToken =
+      typeof accessTokenResult === "string" ? accessTokenResult : accessTokenResult?.token;
+    if (!accessToken) return null;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: modelId,
+        topN: top.length,
+        query,
+        ignoreRecordDetailsInResponse: true,
+        records: top.map((m) => ({
+          id: m.row.id,
+          title: m.row.service_name ?? "",
+          content: m.row.description ?? "",
+        })),
+      }),
+    });
+    if (!response.ok) return null;
+    const parsed = (await response.json()) as {
+      records?: Array<{ id?: string; score?: number }>;
+    };
+    const apiRecords = Array.isArray(parsed.records) ? parsed.records : [];
+
+    const byId = new Map(top.map((t) => [t.row.id, t]));
+    const ordered: RankedServiceMatch[] = [];
+    const scoreMap = new Map<string, number>();
+    for (const record of apiRecords) {
+      const id = record?.id ?? "";
+      const score = typeof record?.score === "number" ? record.score : 0;
+      scoreMap.set(id, score);
+      const hit = byId.get(id);
+      if (hit) ordered.push(hit);
+    }
+    for (const t of top) {
+      if (!ordered.some((o) => o.row.id === t.row.id)) ordered.push(t);
+    }
+
+    const firstScore = scoreMap.get(ordered[0]?.row.id ?? "") ?? 0;
+    const secondScore = scoreMap.get(ordered[1]?.row.id ?? "") ?? 0;
+    const gap = firstScore - secondScore;
+    const confidence: "high" | "medium" | "low" =
+      firstScore >= 0.8 && gap >= 0.08 ? "high" : firstScore >= 0.6 ? "medium" : "low";
+
+    return { ordered, confidence, reason: `ranker_score=${firstScore.toFixed(3)},gap=${gap.toFixed(3)}` };
+  } catch {
+    return null;
+  }
+}
 
 export function createLookupTools(
   state: ThreadState,
@@ -27,10 +233,20 @@ export function createLookupTools(
   }
 
   async function loadClinicsByIds(clinicIds: string[]) {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("c_a_clinics")
-      .select("id, name, address, dr_selection")
+      .select("id, name, address, dr_selection, latitude, longitude")
       .in("id", clinicIds);
+
+    if (error?.message?.includes("does not exist")) {
+      const fallback = await supabase
+        .from("c_a_clinics")
+        .select("id, name, address, dr_selection")
+        .in("id", clinicIds);
+      data = fallback.data;
+      error = fallback.error;
+    }
+
     return {
       data: (data ?? []) as unknown as Record<string, unknown>[],
       error: error?.message,
@@ -76,7 +292,44 @@ export function createLookupTools(
       serviceOptions = buildServiceOptions((infoRows ?? []) as unknown as ServiceInfoRow[]);
     }
 
+    // Keep only services that score best against the normalized search intent.
+    const rankedById = new Map<string, number>();
+    if (query.trim()) {
+      const terms = extractSearchTerms(query);
+      const { data: serviceRows } = await supabase
+        .from("c_a_service_list")
+        .select("id, clinic_id, service_name, description")
+        .eq("clinic_id", clinic.clinicId)
+        .in("id", serviceIds)
+        .limit(50);
+      const normalizedQuery = normalizeText(query);
+      const ranked = ((serviceRows ?? []) as ServiceCatalogRow[])
+        .map((row) => scoreServiceMatch(row, terms, normalizedQuery))
+        .filter((x): x is RankedServiceMatch => Boolean(x))
+        .sort((a, b) => b.score - a.score);
+      ranked.forEach((r, i) => rankedById.set(r.row.id, (r.score * 100) - i));
+    }
+    if (rankedById.size > 0) {
+      serviceOptions = serviceOptions
+        .filter((s) => rankedById.has(s.serviceId))
+        .sort((a, b) => (rankedById.get(b.serviceId) ?? 0) - (rankedById.get(a.serviceId) ?? 0));
+    }
+
     await updateState({ serviceOptions });
+
+    if (serviceOptions.length === 0) {
+      // Catalog had the service name but no bookable service_info rows.
+      // Surface a service-centric message so the UI can recover. Avoid
+      // naming the auto-picked clinic — the user picked a service label,
+      // not a clinic, and seeing a clinic name here is confusing.
+      return JSON.stringify({
+        resultType: "no_bookable_services",
+        searchQuery: query,
+        services: [],
+        message: `"${query}" isn't currently bookable. Please pick another option.`,
+        instruction: "Tell the user this service isn't currently bookable.",
+      });
+    }
 
     return JSON.stringify({
       clinic: clinic.clinicName,
@@ -225,10 +478,48 @@ export function createLookupTools(
           });
         }
 
-        const words = query
-          .toLowerCase()
-          .split(/\s+/)
-          .filter((w) => w.length > 1);
+        const words = extractSearchTerms(query);
+        if (words.length === 0) {
+          return JSON.stringify({
+            found: false,
+            message: "Please describe the symptom or service in a few keywords (e.g. fever, cough, checkup).",
+          });
+        }
+        const normalizedQuery = normalizeText(query);
+        const cacheKey = makeSearchCacheKey(query, state.language);
+        const cached = readCachedSearch(cacheKey);
+        if (cached) {
+          await updateState({
+            clinicOptions: cached.clinicOptions,
+            lastSearchQuery: query,
+            activeClinicId: undefined,
+            activeServiceId: undefined,
+            activeMethodId: undefined,
+            activeDoctorId: undefined,
+            serviceOptions: undefined,
+            doctorOptions: undefined,
+          });
+
+          return JSON.stringify({
+            found: true,
+            clinics: cached.clinicOptions.map((c, i) => ({
+              index: i + 1,
+              name: c.clinicName,
+              address: c.clinicAddress,
+              matchingServices: c.matchingServiceCount,
+            })),
+            nearMeOption: cached.clinicOptions.length >= 2,
+            rerankSource: cached.rerankSource,
+            matchConfidence: cached.matchConfidence,
+            topServiceCandidates: cached.topServiceCandidates,
+            clarificationNeeded: cached.matchConfidence === "low",
+            cacheHit: true,
+            instruction:
+              "Present these clinics to the user. When they choose, call select_clinic with the index number. " +
+              "If nearMeOption is true, the system will append a 'Near me' option to the interactive list — if the user picks it, call search_services_near_me. " +
+              "If clarificationNeeded is true, ask one clarifying question and also show topServiceCandidates as suggestions before clinic selection.",
+          });
+        }
 
         const orConditions = words
           .flatMap((word) => [
@@ -239,23 +530,64 @@ export function createLookupTools(
 
         const { data: matchingServices, error: serviceError } = await supabase
           .from("c_a_service_list")
-          .select("clinic_id")
+          .select("id, clinic_id, service_name, description")
           .or(orConditions)
-          .limit(30);
+          .limit(200);
 
         if (serviceError) {
           return JSON.stringify({ error: "Failed to search services", detail: serviceError.message });
         }
 
-        const allMatches = matchingServices ?? [];
-        if (allMatches.length === 0) {
+        const scoredMatches = ((matchingServices ?? []) as ServiceCatalogRow[])
+          .map((row) => scoreServiceMatch(row, words, normalizedQuery))
+          .filter((x): x is RankedServiceMatch => Boolean(x))
+          .sort((a, b) => b.score - a.score);
+
+        if (scoredMatches.length === 0) {
+          await updateState({
+            clinicOptions: undefined,
+            activeClinicId: undefined,
+            activeServiceId: undefined,
+            activeMethodId: undefined,
+            activeDoctorId: undefined,
+            serviceOptions: undefined,
+            doctorOptions: undefined,
+          });
           return JSON.stringify({ found: false, message: "No services found matching your description." });
         }
 
-        // Count matches per clinic
+        const reranked = await maybeVertexRerank(query, scoredMatches);
+        const rankedMatches = reranked?.ordered ?? scoredMatches;
+        let rerankConfidence: "high" | "medium" | "low" = reranked?.confidence ?? "medium";
+
+        // User provided an explicit service label (e.g. from clarification pick).
+        // Avoid re-asking clarification when we already have a direct name hit.
+        const exactNameHit = rankedMatches.some(
+          (m) => normalizeText(m.row.service_name ?? "") === normalizedQuery
+        );
+        const prefixNameHit = !exactNameHit && rankedMatches.some(
+          (m) => normalizeText(m.row.service_name ?? "").startsWith(normalizedQuery)
+        );
+        if (exactNameHit) {
+          rerankConfidence = "high";
+        } else if (prefixNameHit && rerankConfidence === "low") {
+          rerankConfidence = "medium";
+        }
+
+        // Count matches per clinic. When the query exact-matches a known
+        // service name (e.g. user picked "General Consultation" via clarify),
+        // restrict to clinics that actually offer the exact-named service —
+        // otherwise loose word matches (e.g. "Herbal Consultation" matching
+        // "consultation") inflate the clinic list with clinics that have no
+        // matching service at the catalog-filter step.
+        const eligibleMatches = exactNameHit
+          ? rankedMatches.filter(
+              (m) => normalizeText(m.row.service_name ?? "") === normalizedQuery
+            )
+          : rankedMatches;
         const clinicCounts: Record<string, number> = {};
-        for (const m of allMatches) {
-          clinicCounts[m.clinic_id] = (clinicCounts[m.clinic_id] ?? 0) + 1;
+        for (const m of eligibleMatches.slice(0, 50)) {
+          clinicCounts[m.row.clinic_id] = (clinicCounts[m.row.clinic_id] ?? 0) + 1;
         }
 
         const clinicIds = Object.keys(clinicCounts);
@@ -311,6 +643,18 @@ export function createLookupTools(
           return await fetchClinicServices(clinicOptions[0], query, words);
         }
 
+        const topServiceCandidates = rankedMatches.slice(0, 3).map((m) => ({
+          name: m.row.service_name ?? "Unnamed service",
+          clinicId: m.row.clinic_id,
+        }));
+        const rerankSource = reranked ? "vertex-ranking-api" : "heuristic";
+        writeCachedSearch(cacheKey, {
+          clinicOptions,
+          topServiceCandidates,
+          matchConfidence: rerankConfidence,
+          rerankSource,
+        });
+
         return JSON.stringify({
           found: true,
           clinics: clinicOptions.map((c, i) => ({
@@ -320,9 +664,15 @@ export function createLookupTools(
             matchingServices: c.matchingServiceCount,
           })),
           nearMeOption: clinicOptions.length >= 2,
+          rerankSource,
+          matchConfidence: rerankConfidence,
+          topServiceCandidates,
+          clarificationNeeded: rerankConfidence === "low",
+          cacheHit: false,
           instruction:
             "Present these clinics to the user. When they choose, call select_clinic with the index number. " +
-            "If nearMeOption is true, the system will append a 'Near me' option to the interactive list — if the user picks it, call search_services_near_me.",
+            "If nearMeOption is true, the system will append a 'Near me' option to the interactive list — if the user picks it, call search_services_near_me. " +
+            "If clarificationNeeded is true, ask one clarifying question and also show topServiceCandidates as suggestions before clinic selection.",
         });
       },
     }),
@@ -569,6 +919,9 @@ export function createLookupTools(
           selectedMethod = service.methods[methodIndex - 1];
           selectedMethodId = selectedMethod.methodId;
         } else {
+          // Persist the service pick so the deterministic method_select_
+          // handler can find it via state.activeServiceId on the next turn.
+          await updateState({ activeServiceId: service.serviceId, activeMethodId: undefined });
           return JSON.stringify({
             needsMethodSelection: true,
             service: service.serviceName,
@@ -806,6 +1159,71 @@ export function createLookupTools(
           duration: ((b as any).service_info?.duration as number | null) ?? 30,
         }));
 
+        // Server-side free-slot computation. The LLM was asked to compute
+        // gaps from raw hours + booked slots; it routinely got it wrong.
+        const slotDuration = 30;
+        const timeToMin = (t: unknown): number | null => {
+          if (typeof t !== "string") return null;
+          const m = /^(\d{1,2}):(\d{2})/.exec(t);
+          if (!m) return null;
+          const h = Number(m[1]);
+          const mn = Number(m[2]);
+          if (!Number.isFinite(h) || !Number.isFinite(mn)) return null;
+          return h * 60 + mn;
+        };
+        const minToTime = (m: number): string =>
+          `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+        const startMin = timeToMin(dayStart);
+        const endMin = timeToMin(dayEnd);
+        const freeSlots: string[] = [];
+        if (startMin !== null && endMin !== null && endMin > startMin) {
+          const blocked: Array<{ s: number; e: number }> = [];
+          for (const br of breaks as Array<{ start: unknown; end: unknown }>) {
+            const s = timeToMin((br as any).start);
+            const e = timeToMin((br as any).end);
+            if (s !== null && e !== null && e > s) blocked.push({ s, e });
+          }
+          for (const b of bookedTimes) {
+            const s = timeToMin((b as any).time);
+            if (s === null) continue;
+            const dur = typeof (b as any).duration === "number" && (b as any).duration > 0
+              ? (b as any).duration
+              : 30;
+            blocked.push({ s, e: s + dur });
+          }
+          blocked.sort((a, b) => a.s - b.s);
+
+          // For today, hide slots earlier than (now + 30 min) to avoid
+          // suggesting effectively-impossible times.
+          const todayYmd = (() => {
+            const d = new Date();
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, "0");
+            const dd = String(d.getDate()).padStart(2, "0");
+            return `${y}-${m}-${dd}`;
+          })();
+          const isToday = date === todayYmd;
+          const earliestForToday = isToday
+            ? new Date().getHours() * 60 + new Date().getMinutes() + 30
+            : -1;
+
+          let cursor = Math.max(startMin, earliestForToday);
+          // Round cursor up to the next 30-min mark.
+          if (cursor % slotDuration !== 0) cursor = Math.ceil(cursor / slotDuration) * slotDuration;
+
+          let safety = 0;
+          while (cursor + slotDuration <= endMin && safety++ < 200) {
+            const slotEnd = cursor + slotDuration;
+            const conflict = blocked.find((bl) => bl.s < slotEnd && bl.e > cursor);
+            if (conflict) {
+              cursor = Math.ceil(conflict.e / slotDuration) * slotDuration;
+              continue;
+            }
+            freeSlots.push(minToTime(cursor));
+            cursor += slotDuration;
+          }
+        }
+
         const newPatientBookedSlots: Array<{ time: string | null; duration: number }> = [];
 
         const countByStartTime: Record<string, number> = {};
@@ -828,6 +1246,7 @@ export function createLookupTools(
           lunch: lunchStart && lunchEnd ? { start: lunchStart, end: lunchEnd } : null,
           breaks,
           bookedSlots: bookedTimes,
+          freeSlots,
           newPatientLimit,
           newPatientBookedSlots,
           newPatientSlotsAtLimit,

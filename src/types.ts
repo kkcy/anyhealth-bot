@@ -74,4 +74,45 @@ export interface ThreadState {
 
   /** Set when user taps "Get document" on a doc-ready reminder. Cleared next non-button turn. */
   pendingDocRetrievalBookingId?: string;
+
+  // Deterministic interactive flow guards
+  pendingSelectionType?: "service_clarify" | "clinic";
+  pendingSelectionQuery?: string;
+
+  /**
+   * Booking args staged by create_booking({confirmed:false}). On Yes button
+   * the deterministic handler re-runs create_booking with these + confirmed:true.
+   */
+  pendingBooking?: {
+    date: string;
+    time?: string;
+    address?: string;
+    reminderRemark?: string;
+    isNewPatient?: boolean;
+    bookingType?: "checkup" | "consultation" | "vaccination";
+  };
+
+  /** Date picked via the deterministic date list, awaiting time selection. */
+  pendingBookingDate?: string;
+
+  /** Yes/No answer to "is this for a new patient?", recorded before time pick. */
+  pendingIsNewPatient?: boolean;
+
+  /**
+   * Set when the picked method needs an address: the next plain-text turn
+   * is treated as the address rather than free-form input for the LLM.
+   */
+  awaitingAddress?: boolean;
+
+  /**
+   * Set when the user picked "Other time": the next plain-text turn is
+   * parsed as HH:mm and treated as the booking time.
+   */
+  awaitingTime?: boolean;
+
+  /**
+   * Set when the user picked "Other date": the next plain-text turn is
+   * parsed as a date and routed through the time picker.
+   */
+  awaitingDate?: boolean;
 }

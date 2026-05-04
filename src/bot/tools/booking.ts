@@ -57,8 +57,12 @@ export function createBookingTools(
   return {
     create_booking: tool({
       description:
-        "Create a new appointment booking. Reads patient, service, clinic, method, and doctor from current selections. " +
-        "Call select_service first and include confirmation before finalizing.",
+        "Create a new appointment booking. Reads patient, service, clinic, method, and doctor from current selections.\n" +
+        "TWO-STEP PATTERN — always follow:\n" +
+        "1. After all details are gathered (date, time, address if needed), call this tool with `confirmed: false` and ALL args. " +
+        "The system will then surface Yes/No confirm buttons to the user. Do NOT also send a free-text 'please confirm' message.\n" +
+        "2. The user's Yes tap is handled by the system and re-runs this tool with `confirmed: true` automatically. " +
+        "Never call with `confirmed: true` yourself unless the user typed an explicit confirmation in plain text.",
       inputSchema: z.object({
         date: z.string().describe("Appointment date in YYYY-MM-DD format"),
         time: z.string().optional().describe("Appointment time in HH:mm format (required if method requiresTime)"),
@@ -84,7 +88,26 @@ export function createBookingTools(
           return JSON.stringify({ error: "No patient selected. Call user_lookup or select_patient first." });
         }
         if (!confirmed) {
-          return JSON.stringify({ error: "Please confirm all booking details before finalizing the booking." });
+          // Stage the args so the deterministic Yes/No button can finalize.
+          await updateState({
+            pendingBooking: {
+              date,
+              time,
+              address,
+              reminderRemark: (reminderRemark ?? details) ?? undefined,
+              isNewPatient,
+              bookingType,
+            },
+          });
+          return JSON.stringify({
+            needsConfirmation: true,
+            date,
+            time: time ?? null,
+            address: address ?? null,
+            instruction:
+              "Show the user a summary of the booking and ask them to confirm. " +
+              "The system will surface Yes/No buttons; do not call create_booking again until they confirm.",
+          });
         }
 
         // Auto-resolve missing selections when there's only one option
@@ -292,6 +315,12 @@ export function createBookingTools(
           clinicOptions: undefined,
           serviceOptions: undefined,
           doctorOptions: undefined,
+          pendingBooking: undefined,
+          pendingBookingDate: undefined,
+          pendingIsNewPatient: undefined,
+          awaitingAddress: undefined,
+          awaitingTime: undefined,
+          awaitingDate: undefined,
         });
 
         // Best-effort reminder enqueue. Never blocks user-facing booking confirmation.

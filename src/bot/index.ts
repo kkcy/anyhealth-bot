@@ -55,11 +55,19 @@ function createBot() {
     await thread.subscribe();
 
     const phone = extractPhone(thread);
-    await thread.setState({
-      phone,
-      verified: false,
-      verifyAttempts: 0,
-    });
+    const existing = (await thread.state) as ThreadState | null;
+    if (!existing) {
+      await thread.setState({
+        phone,
+        verified: false,
+        verifyAttempts: 0,
+      });
+      console.log("[STATE] Initialized new thread state in onNewMention");
+    } else if (!existing.phone) {
+      existing.phone = phone;
+      await thread.setState(existing);
+      console.log("[STATE] Backfilled missing phone in existing state");
+    }
 
     await handleMessage(thread, message);
   });
@@ -104,19 +112,9 @@ function extractPhone(thread: { id: string }): string {
 
 function shouldSendBookingConfirmButtons(text: string, state: ThreadState): boolean {
   if (!text) return false;
-
-  const hasBookingContext =
-    Boolean(state.userId) &&
-    Boolean(state.activePatientId) &&
-    Boolean(state.activeClinicId) &&
-    Boolean(state.activeServiceId);
-  if (!hasBookingContext) return false;
-
-  const asksForConfirm = /\b(confirm|confirmation)\b/i.test(text);
-  const mentionsBooking = /\b(booking|appointment|details)\b/i.test(text);
+  if (!state.pendingBooking) return false;
   const alreadyFinalized = /\b(created successfully|booking created|booking id)\b/i.test(text);
-
-  return asksForConfirm && mentionsBooking && !alreadyFinalized;
+  return !alreadyFinalized;
 }
 
 interface InteractiveOption {
@@ -129,6 +127,18 @@ interface InteractivePlan {
   body: string;
   options: InteractiveOption[];
 }
+
+// Friendly prompts shown above each interactive list. These strings are also
+// used as identity keys downstream (`selectionPlan.body === PLAN_BODY.clinic`)
+// — keep the literal in sync with the matchers if you change them.
+const PLAN_BODY = {
+  patient: "Who's this appointment for?",
+  serviceClarify: "What kind of service are you looking for?",
+  clinic: "Which clinic would you like?",
+  service: "Which service would you like?",
+  method: "How would you like the visit?",
+  doctor: "Which doctor would you prefer?",
+} as const;
 
 function clip(value: string, max: number): string {
   if (value.length <= max) return value;
@@ -156,6 +166,18 @@ function extractInteractiveReplyId(message: any): string | undefined {
   );
 }
 
+function extractInteractiveReplyTitle(message: any): string | undefined {
+  return (
+    message?.buttonReply?.title ??
+    message?.interactive?.button_reply?.title ??
+    message?.interactive?.list_reply?.title ??
+    message?.payload?.interactive?.button_reply?.title ??
+    message?.payload?.interactive?.list_reply?.title ??
+    message?.context?.list_reply?.title ??
+    message?.context?.button_reply?.title
+  );
+}
+
 function extractLocation(message: any): { lat: number; lng: number } | undefined {
   const loc =
     message?.location ??
@@ -169,26 +191,11 @@ function extractLocation(message: any): { lat: number; lng: number } | undefined
 }
 
 function mapInteractiveReplyToText(
-  replyId: string | undefined,
-  state?: ThreadState
+  replyId: string | undefined
 ): string | undefined {
   if (!replyId) return undefined;
-
-  if (replyId === "NEAR_ME") {
-    return "I'd like to see clinics near me. Please call search_services_near_me with the previous query.";
-  }
-
-  if (replyId === "booking_confirm_yes") {
-    return "Yes, I confirm the booking. Please call create_booking now.";
-  }
-  if (replyId === "booking_confirm_no") {
-    return "I want to change my booking details.";
-  }
-
-  if (replyId.startsWith("view_booking:")) {
-    const id = replyId.split(":")[1];
-    return `I'd like to see the details for booking ${id}. Please call get_booking_details.`;
-  }
+  // Only the non-deterministic ids reach the LLM. Everything else is handled
+  // by deterministic prefixes earlier in handleMessage().
   if (replyId.startsWith("get_doc:")) {
     const id = replyId.split(":")[1];
     return `I'd like to get the documents for booking ${id}.`;
@@ -197,27 +204,131 @@ function mapInteractiveReplyToText(
     const id = replyId.split(":")[1];
     return `I want to mute reminders for clinic ${id}.`;
   }
+  return undefined;
+}
 
-  const namedPick = (
-    prefix: string,
-    label: string,
-    tool: string,
-    name?: string
-  ): string | undefined => {
-    if (!replyId.startsWith(prefix)) return undefined;
-    const index = Number(replyId.replace(prefix, ""));
-    if (!Number.isInteger(index) || index <= 0) return undefined;
-    const tail = name ? ` (${name})` : "";
-    return `I pick ${label} ${index}${tail} from the ${label} list. Call ${tool} with index ${index}.`;
+function parseIndexedReply(replyId: string, prefix: string): number | null {
+  if (!replyId.startsWith(prefix)) return null;
+  const index = Number(replyId.replace(prefix, ""));
+  if (!Number.isInteger(index) || index <= 0) return null;
+  return index;
+}
+
+function ymdLocal(daysFromToday: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + daysFromToday);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+function humanDay(ymd: string): string {
+  const d = new Date(`${ymd}T12:00:00`);
+  return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+function parseUserDate(text: string): string | null {
+  const t = text.trim();
+  // Strict YYYY-MM-DD / YYYY/MM/DD with possibly single-digit M or D.
+  const m = /^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/.exec(t);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  }
+  // Permissive fallback: let JS parse natural language ("May 7 2026").
+  const ts = Date.parse(t);
+  if (Number.isFinite(ts)) {
+    const dt = new Date(ts);
+    if (!Number.isNaN(dt.getTime())) {
+      return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+    }
+  }
+  return null;
+}
+
+function buildDatePickerPlan(): InteractivePlan {
+  const today = ymdLocal(0);
+  const tomorrow = ymdLocal(1);
+  const dayAfter = ymdLocal(2);
+  return {
+    body: "Which day works for you?",
+    options: [
+      { id: `date_select_${today}`, title: "Today", description: humanDay(today) },
+      { id: `date_select_${tomorrow}`, title: "Tomorrow", description: humanDay(tomorrow) },
+      { id: `date_select_${dayAfter}`, title: humanDay(dayAfter).split(",")[0], description: humanDay(dayAfter) },
+      { id: "date_select_other", title: "Other date", description: "Type a date like 2026-05-15" },
+    ],
   };
+}
 
-  return (
-    namedPick("patient_select_", "patient", "select_patient", state?.patients?.[Number(replyId.replace("patient_select_", "")) - 1]?.name) ??
-    namedPick("clinic_select_", "clinic", "select_clinic", state?.clinicOptions?.[Number(replyId.replace("clinic_select_", "")) - 1]?.clinicName) ??
-    namedPick("service_select_", "service", "select_service", state?.serviceOptions?.[Number(replyId.replace("service_select_", "")) - 1]?.serviceName) ??
-    namedPick("method_select_", "method", "select_service") ??
-    namedPick("doctor_select_", "doctor", "select_doctor", state?.doctorOptions?.[Number(replyId.replace("doctor_select_", "")) - 1]?.name)
-  );
+type Period = "morning" | "afternoon" | "evening";
+const PERIOD_LABELS: Record<Period, string> = {
+  morning: "Morning",
+  afternoon: "Afternoon",
+  evening: "Evening",
+};
+
+function timeStrToMin(t: string): number {
+  const [h, m] = t.split(":").map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+function bucketSlotsByPeriod(slots: string[]): Record<Period, string[]> {
+  const out: Record<Period, string[]> = { morning: [], afternoon: [], evening: [] };
+  for (const t of slots) {
+    const m = timeStrToMin(t);
+    if (m < 12 * 60) out.morning.push(t);
+    else if (m < 17 * 60) out.afternoon.push(t);
+    else out.evening.push(t);
+  }
+  return out;
+}
+
+const TIME_SELECT_OTHER: InteractiveOption = {
+  id: "time_select_other",
+  title: "Other time",
+  description: "Type your preferred HH:mm",
+};
+
+function buildPeriodPickerPlan(date: string, slots: string[]): InteractivePlan {
+  const buckets = bucketSlotsByPeriod(slots);
+  const options: InteractiveOption[] = [];
+  for (const p of ["morning", "afternoon", "evening"] as const) {
+    if (buckets[p].length > 0) {
+      const range = `${buckets[p][0]}–${buckets[p][buckets[p].length - 1]}`;
+      options.push({
+        id: `period_select_${p}`,
+        title: PERIOD_LABELS[p],
+        description: `${buckets[p].length} slot${buckets[p].length === 1 ? "" : "s"} · ${range}`,
+      });
+    }
+  }
+  options.push(TIME_SELECT_OTHER);
+  return { body: `When would you like to come on ${humanDay(date)}?`, options };
+}
+
+function buildTimeListPlan(
+  date: string,
+  slots: string[],
+  periodLabel?: string
+): InteractivePlan {
+  // WhatsApp lists cap at 10 rows. Reserve the last for "Other time".
+  const visible = slots.slice(0, 9);
+  const options: InteractiveOption[] = visible.map((t) => ({
+    id: `time_select_${t.replace(":", "")}`,
+    title: t,
+  }));
+  options.push(TIME_SELECT_OTHER);
+  return {
+    body: periodLabel
+      ? `${periodLabel} times on ${humanDay(date)}:`
+      : `Here's what's open on ${humanDay(date)}:`,
+    options,
+  };
 }
 
 function buildInteractivePlanFromToolResults(
@@ -247,7 +358,24 @@ function buildInteractivePlanFromToolResults(
           description: p.ic ? `IC ending ${String(p.ic)}` : undefined,
         }));
       if (options.length > 0) {
-        return { body: "Please choose a patient.", options };
+        return { body: PLAN_BODY.patient, options };
+      }
+    }
+
+    if (
+      toolName === "search_services" &&
+      data.clarificationNeeded === true &&
+      Array.isArray(data.topServiceCandidates) &&
+      data.topServiceCandidates.length > 0
+    ) {
+      const options = data.topServiceCandidates
+        .slice(0, 3)
+        .map((s: any, i: number) => ({
+          id: `clarify_service_${encodeURIComponent(String(s.name ?? `Service ${i + 1}`))}`,
+          title: clip(String(s.name ?? `Service ${i + 1}`), 24),
+        }));
+      if (options.length > 0) {
+        return { body: PLAN_BODY.serviceClarify, options };
       }
     }
 
@@ -270,8 +398,8 @@ function buildInteractivePlanFromToolResults(
             typeof c.distanceKm === "number"
               ? clip(`${c.distanceKm.toFixed(1)} km · ${String(c.address ?? "")}`, 72)
               : c.address
-              ? clip(String(c.address), 72)
-              : undefined,
+                ? clip(String(c.address), 72)
+                : undefined,
         }));
       if (data.nearMeOption === true) {
         options.push({
@@ -281,7 +409,7 @@ function buildInteractivePlanFromToolResults(
         });
       }
       if (options.length > 0) {
-        return { body: "Please choose a clinic.", options };
+        return { body: PLAN_BODY.clinic, options };
       }
     }
 
@@ -294,7 +422,7 @@ function buildInteractivePlanFromToolResults(
           description: s.duration ? clip(String(s.duration), 72) : undefined,
         }));
       if (options.length > 0) {
-        return { body: "Please choose a service.", options };
+        return { body: PLAN_BODY.service, options };
       }
     }
 
@@ -312,7 +440,7 @@ function buildInteractivePlanFromToolResults(
           description: m.requiresAddress ? "Address required" : m.requiresTime ? "Time required" : undefined,
         }));
       if (options.length > 0) {
-        return { body: "Please choose a method.", options };
+        return { body: PLAN_BODY.method, options };
       }
     }
 
@@ -330,7 +458,7 @@ function buildInteractivePlanFromToolResults(
           title: clip(String(d.name ?? `Doctor ${d.index}`), 24),
         }));
       if (options.length > 0) {
-        return { body: "Please choose a doctor.", options };
+        return { body: PLAN_BODY.doctor, options };
       }
     }
   }
@@ -341,7 +469,7 @@ function buildInteractivePlanFromToolResults(
 function buildInteractivePlanFromState(state: ThreadState): InteractivePlan | undefined {
   if (!state.activePatientId && (state.patients?.length ?? 0) > 1) {
     return {
-      body: "Please choose a patient.",
+      body: PLAN_BODY.patient,
       options: (state.patients ?? []).slice(0, 10).map((p, i) => ({
         id: `patient_select_${i + 1}`,
         title: clip(String(p.name ?? `Patient ${i + 1}`), 24),
@@ -351,7 +479,7 @@ function buildInteractivePlanFromState(state: ThreadState): InteractivePlan | un
 
   if (!state.activeClinicId && (state.clinicOptions?.length ?? 0) > 1) {
     return {
-      body: "Please choose a clinic.",
+      body: PLAN_BODY.clinic,
       options: (state.clinicOptions ?? []).slice(0, 10).map((c, i) => ({
         id: `clinic_select_${i + 1}`,
         title: clip(String(c.clinicName ?? `Clinic ${i + 1}`), 24),
@@ -360,9 +488,9 @@ function buildInteractivePlanFromState(state: ThreadState): InteractivePlan | un
     };
   }
 
-  if (!state.activeServiceId && (state.serviceOptions?.length ?? 1) > 1) {
+  if (!state.activeServiceId && (state.serviceOptions?.length ?? 0) >= 1) {
     return {
-      body: "Please choose a service.",
+      body: PLAN_BODY.service,
       options: (state.serviceOptions ?? []).slice(0, 10).map((s, i) => ({
         id: `service_select_${i + 1}`,
         title: clip(String(s.serviceName ?? `Service ${i + 1}`), 24),
@@ -370,9 +498,23 @@ function buildInteractivePlanFromState(state: ThreadState): InteractivePlan | un
     };
   }
 
-  if (!state.activeDoctorId && (state.doctorOptions?.length ?? 0) > 1) {
+  if (state.activeServiceId && !state.activeMethodId) {
+    const svc = (state.serviceOptions ?? []).find((s) => s.serviceId === state.activeServiceId);
+    if (svc && svc.methods.length > 1) {
+      return {
+        body: PLAN_BODY.method,
+        options: svc.methods.slice(0, 10).map((m, i) => ({
+          id: `method_select_${i + 1}`,
+          title: clip(String(m.methodName ?? `Method ${i + 1}`), 24),
+          description: m.requiresAddress ? "Address required" : m.requiresTime ? "Time required" : undefined,
+        })),
+      };
+    }
+  }
+
+  if (!state.activeDoctorId && (state.doctorOptions?.length ?? 0) >= 1) {
     return {
-      body: "Please choose a doctor.",
+      body: PLAN_BODY.doctor,
       options: (state.doctorOptions ?? []).slice(0, 10).map((d, i) => ({
         id: `doctor_select_${i + 1}`,
         title: clip(String(d.name ?? `Doctor ${i + 1}`), 24),
@@ -418,7 +560,7 @@ async function sendInteractivePlan(
 ): Promise<boolean> {
   const rawBody = bodyOverride?.trim() ? stripNumberedList(bodyOverride) : plan.body;
   const body = clip(rawBody || plan.body, 900);
-  return sendListMessage(phone, body, "Choose option", [
+  return sendListMessage(phone, body, "Pick one", [
     {
       title: "Options",
       rows: plan.options.slice(0, 10).map((o) => ({
@@ -480,8 +622,8 @@ export function createFakeThread(phone: string): FakeThread {
         links: [],
       });
     },
-    async startTyping() {},
-    async subscribe() {},
+    async startTyping() { },
+    async subscribe() { },
     get allMessages() {
       const snapshot = [...history];
       return {
@@ -529,8 +671,14 @@ export async function deliverInteractiveReply(
 }
 
 export async function handleMessage(thread: any, message: any) {
-  console.log("[BOT] handleMessage build-marker=v2-2026-04-26");
-  console.log(`[BOT] Incoming message from ${thread.id}:`, JSON.stringify(message, null, 2));
+  const _msgKind = message?.interactive
+    ? `interactive:${message.interactive?.list_reply?.id ?? message.interactive?.button_reply?.id ?? "?"}`
+    : message?.location
+    ? "location"
+    : message?.text?.body
+    ? `text:"${clip(String(message.text.body), 80)}"`
+    : "other";
+  console.log(`[BOT] handleMessage thread=${thread.id} kind=${_msgKind}`);
 
   await thread.startTyping?.();
 
@@ -544,14 +692,12 @@ export async function handleMessage(thread: any, message: any) {
     state.phone = extractPhone(thread);
   }
 
-  console.log("[BOT] Loaded state:", JSON.stringify({
-    userId: state.userId,
-    activePatientId: state.activePatientId,
-    activeClinicId: state.activeClinicId,
-    activeServiceId: state.activeServiceId,
-    activeMethodId: state.activeMethodId,
-    activeDoctorId: state.activeDoctorId,
-  }));
+  console.log(
+    `[BOT] state user=${state.userId ? "y" : "n"} pat=${state.activePatientId ? "y" : "n"} ` +
+    `cli=${state.activeClinicId ? "y" : "n"} svc=${state.activeServiceId ? "y" : "n"} ` +
+    `mtd=${state.activeMethodId ? "y" : "n"} doc=${state.activeDoctorId ? "y" : "n"} ` +
+    `pendingType=${state.pendingSelectionType ?? "-"} pendingQuery="${state.pendingSelectionQuery ?? "-"}"`
+  );
 
   async function updateState(partial: Partial<ThreadState>) {
     Object.assign(state, partial);
@@ -668,6 +814,104 @@ export async function handleMessage(thread: any, message: any) {
   }
 
   const isInteractiveClick = !!extractInteractiveReplyId(activeMessage);
+
+  // Date-await: previous turn was "Other date" — parse this text as YYYY-MM-DD
+  // (or a natural-language date) and route through the time picker.
+  if (state.awaitingDate && !isInteractiveClick && incomingText.trim().length > 0) {
+    const parsed = parseUserDate(incomingText);
+    if (!parsed) {
+      console.log(`[DET] awaitingDate parse_fail text="${clip(incomingText, 60)}"`);
+      await thread.post("That doesn't look like a date. Please type YYYY-MM-DD, e.g. 2026-05-15.");
+      return;
+    }
+    // Reject past dates.
+    const todayYmd = ymdLocal(0);
+    if (parsed < todayYmd) {
+      console.log(`[DET] awaitingDate past date=${parsed}`);
+      await thread.post(`That date (${parsed}) is in the past. Please pick a future date.`);
+      await updateState({ awaitingDate: undefined });
+      await sendDatePicker();
+      return;
+    }
+    console.log(`[DET] awaitingDate parsed date=${parsed}`);
+    await updateState({ pendingBookingDate: parsed, awaitingDate: undefined, awaitingTime: undefined });
+    await presentTimesForDate(parsed);
+    return;
+  }
+
+  // Time-await: previous turn was "Other time" — parse this text as HH:mm
+  // and run the same processSelectedTime path. Defined inline because the
+  // helpers below close over `state`/`tools`. Skip on interactive clicks.
+  if (state.awaitingTime && !isInteractiveClick && incomingText.trim().length > 0) {
+    const m = /(\d{1,2}):(\d{2})/.exec(incomingText);
+    if (!m) {
+      console.log(`[DET] awaitingTime parse_fail text="${clip(incomingText, 60)}"`);
+      await thread.post("That doesn't look like a time. Please type HH:mm, e.g. 14:30.");
+      return;
+    }
+    const h = Math.max(0, Math.min(23, Number(m[1])));
+    const mn = Math.max(0, Math.min(59, Number(m[2])));
+    const time = `${String(h).padStart(2, "0")}:${String(mn).padStart(2, "0")}`;
+    console.log(`[DET] awaitingTime parsed time=${time}`);
+    // processSelectedTime is defined later in the function but hoisted.
+    await processSelectedTime(time);
+    return;
+  }
+
+  // Address-await: previous turn picked a time on a method that requires an
+  // address. Treat this incoming text as the address, restage, and prompt
+  // for confirmation. Skip on interactive clicks (those have their own flow).
+  if (
+    state.awaitingAddress &&
+    !isInteractiveClick &&
+    state.pendingBooking?.date &&
+    state.pendingBooking?.time &&
+    incomingText.trim().length > 0
+  ) {
+    const addr = incomingText.trim();
+    console.log(`[DET] address_capture len=${addr.length}`);
+    const staged = state.pendingBooking;
+    const raw = await (tools as any).create_booking.execute({
+      date: staged.date,
+      time: staged.time,
+      address: addr,
+      isNewPatient: staged.isNewPatient,
+      bookingType: staged.bookingType ?? "consultation",
+      confirmed: false,
+    });
+    const data = parseJsonSafe(raw);
+    if (data?.error) {
+      await thread.post(typeof data.error === "string" ? data.error : "Couldn't stage that address. Please try again.");
+      return;
+    }
+    await updateState({ awaitingAddress: undefined });
+
+    const svc = (state.serviceOptions ?? []).find((s) => s.serviceId === state.activeServiceId);
+    const meth = svc?.methods.find((mm) => mm.methodId === state.activeMethodId);
+    const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
+    const doctor = (state.doctorOptions ?? []).find((d) => d.doctorId === state.activeDoctorId);
+    const patient = (state.patients ?? []).find((p) => p.id === state.activePatientId);
+    const summary = [
+      "Here are your booking details — does this look right?",
+      patient ? `Patient: ${patient.name}` : null,
+      clinicOpt ? `Clinic: ${clinicOpt.clinicName}` : null,
+      svc ? `Service: ${svc.serviceName}${meth?.methodName ? ` (${meth.methodName})` : ""}` : null,
+      doctor ? `Doctor: ${doctor.name}` : null,
+      `Date: ${humanDay(staged.date)}`,
+      staged.time ? `Time: ${staged.time}` : null,
+      `Address: ${addr}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const sent = await sendReplyButtons(extractPhone(thread), summary, [
+      { id: "booking_confirm_yes", title: "Yes, confirm" },
+      { id: "booking_confirm_no", title: "Change details" },
+    ]);
+    if (!sent) await thread.post(summary);
+    return;
+  }
+
   const incomingLocation = extractLocation(activeMessage);
   if (incomingLocation) {
     await updateState({
@@ -682,36 +926,543 @@ export async function handleMessage(thread: any, message: any) {
     );
   }
   const interactiveReplyId = extractInteractiveReplyId(activeMessage);
-  if (interactiveReplyId === "NEAR_ME" && !state.lastLocation) {
-    const body =
-      "To find clinics near you, please share your location.";
-    const sent = await sendLocationRequest(extractPhone(thread), body);
-    console.log(`[NEAR_ME] short-circuit location_request success=${sent}`);
+  const interactiveReplyTitle = extractInteractiveReplyTitle(activeMessage);
+  if (interactiveReplyId) {
+    console.log(`[DET] interactive id=${interactiveReplyId} title="${clip(String(interactiveReplyTitle ?? ""), 40)}"`);
+    if (interactiveReplyId === "booking_confirm_yes") {
+      const staged = state.pendingBooking;
+      if (!staged) {
+        console.log(`[DET] booking_confirm_yes no_pending`);
+        await thread.post("I don't have your booking details staged anymore. Please share the date and time again.");
+        return;
+      }
+      const raw = await (tools as any).create_booking.execute({
+        ...staged,
+        confirmed: true,
+      });
+      const data = parseJsonSafe(raw);
+      console.log(`[DET] booking_confirm_yes success=${!!data?.success} bookingId=${data?.bookingId ?? "-"}`);
+      await thread.post(
+        data?.success
+          ? String(data.message ?? "Booking created successfully.")
+          : String(data?.error ?? "I couldn't complete the booking. Please try again.")
+      );
+      return;
+    }
+    if (interactiveReplyId === "booking_confirm_no") {
+      console.log(`[DET] booking_confirm_no`);
+      await updateState({
+        pendingBooking: undefined,
+        pendingBookingDate: undefined,
+        pendingIsNewPatient: undefined,
+        awaitingAddress: undefined,
+        awaitingTime: undefined,
+        awaitingDate: undefined,
+      });
+      await thread.post("No problem — what would you like to change?");
+      return;
+    }
+    if (interactiveReplyId === "NEAR_ME" && !state.lastLocation) {
+      const body = "To find clinics near you, please share your location.";
+      const sent = await sendLocationRequest(extractPhone(thread), body);
+      console.log(`[DET] near_me request_location sent=${sent}`);
+      if (!sent) {
+        await thread.post(body);
+      }
+      return;
+    }
+    if (interactiveReplyId === "NEAR_ME" && state.lastLocation) {
+      const raw = await (tools as any).search_services_near_me.execute({});
+      const plan = buildInteractivePlanFromToolResults(
+        [{ toolName: "search_services_near_me", result: raw }],
+        state
+      );
+      const sent = plan ? await sendInteractivePlan(extractPhone(thread), plan) : false;
+      console.log(`[DET] near_me search plan="${plan?.body ?? "-"}" sent=${sent}`);
+      if (!sent) {
+        const data = parseJsonSafe(raw);
+        await thread.post(String(data?.message ?? "I found nearby clinics. Please choose one."));
+      }
+      return;
+    }
+    if (interactiveReplyId.startsWith("patient_select_")) {
+      const index = parseIndexedReply(interactiveReplyId, "patient_select_");
+      if (index) {
+        const raw = await (tools as any).select_patient.execute({ index });
+        const data = parseJsonSafe(raw);
+        console.log(`[DET] patient_select idx=${index} success=${!!data?.success} name="${data?.patientName ?? "-"}"`);
+        await thread.post(
+          data?.success
+            ? `Noted. ${data.message ?? "Patient selected."}`
+            : String(data?.error ?? "Invalid patient selection.")
+        );
+        return;
+      }
+    }
+    if (interactiveReplyId.startsWith("view_booking:")) {
+      const id = interactiveReplyId.split(":")[1];
+      const raw = await (tools as any).get_booking_details.execute({ bookingId: id });
+      const data = parseJsonSafe(raw);
+      console.log(`[DET] view_booking id=${id} hasSummary=${typeof data?.summary === "string"}`);
+      await thread.post(
+        typeof data?.summary === "string"
+          ? data.summary
+          : typeof data?.message === "string"
+          ? data.message
+          : "Here are your booking details."
+      );
+      return;
+    }
+  }
+
+  // Deterministic interactive handlers to avoid LLM guesswork loops.
+  if (interactiveReplyId?.startsWith("clarify_service_")) {
+    const encoded = interactiveReplyId.replace("clarify_service_", "").trim();
+    const picked = decodeURIComponent(encoded || interactiveReplyTitle || "").trim();
+    if (picked) {
+      const originalQuery = state.pendingSelectionQuery;
+      const raw = await (tools as any).search_services.execute({ query: picked });
+      const data = parseJsonSafe(raw);
+
+      // No bookable services at the auto-picked clinic: recover by re-running
+      // the original search so the user has alternatives to choose from.
+      if (data?.resultType === "no_bookable_services") {
+        console.log(`[DET] clarify_service no_bookable picked="${picked}"`);
+        await updateState({
+          activeClinicId: undefined,
+          activeServiceId: undefined,
+          activeMethodId: undefined,
+          serviceOptions: undefined,
+          pendingSelectionType: undefined,
+          pendingSelectionQuery: undefined,
+        });
+        const msg = typeof data.message === "string"
+          ? data.message
+          : `"${picked}" isn't currently bookable. Here's what's available:`;
+        if (originalQuery) {
+          const recoverRaw = await (tools as any).search_services.execute({ query: originalQuery });
+          const recoverPlan = buildInteractivePlanFromToolResults(
+            [{ toolName: "search_services", result: recoverRaw }],
+            state
+          );
+          if (recoverPlan) {
+            // Fold the explanation into the list body so the user sees the
+            // reason and the new options together — no separate text bubble
+            // that looks like the bot already chose something.
+            const sentRecover = await sendInteractivePlan(
+              extractPhone(thread),
+              recoverPlan,
+              `${msg}\n\n${recoverPlan.body}`
+            );
+            if (sentRecover) return;
+          }
+        }
+        await thread.post(msg);
+        return;
+      }
+
+      // search_services may auto-select a single clinic and return
+      // serviceOptions directly. If so, and the picked label matches one of
+      // those services exactly, auto-select that service too — otherwise the
+      // user gets re-prompted for the same service they just chose.
+      const clarifiedLower = picked.trim().toLowerCase();
+      const opts = state.serviceOptions ?? [];
+      const matchIdx = opts.findIndex(
+        (s) => s.serviceName.trim().toLowerCase() === clarifiedLower
+      );
+      if (state.activeClinicId && matchIdx >= 0) {
+        console.log(
+          `[GUARD] Auto-selecting service "${opts[matchIdx].serviceName}" (idx=${matchIdx + 1}) from clarify pick`
+        );
+        const svcRaw = await (tools as any).select_service.execute({ index: matchIdx + 1 });
+        const handled = await handleSelectServiceResult(svcRaw, "clarify_service->service");
+        await updateState({ pendingSelectionType: undefined, pendingSelectionQuery: undefined });
+        if (handled) return;
+      }
+
+      const plan = buildInteractivePlanFromToolResults([{ toolName: "search_services", result: raw }], state);
+      const sent = plan ? await sendInteractivePlan(extractPhone(thread), plan) : false;
+      console.log(`[DET] clarify_service picked="${picked}" plan="${plan?.body ?? "-"}" sent=${sent}`);
+      await updateState({
+        pendingSelectionType: plan?.body === PLAN_BODY.clinic ? "clinic" : undefined,
+        pendingSelectionQuery: plan?.body === PLAN_BODY.clinic ? picked : undefined,
+      });
+      if (!sent) {
+        await thread.post(typeof data?.message === "string" ? data.message : "Got it — what would you like to do next?");
+      }
+      return;
+    }
+  }
+
+  async function sendDatePicker(): Promise<void> {
+    const plan = buildDatePickerPlan();
+    const sent = await sendInteractivePlan(extractPhone(thread), plan);
+    console.log(`[DET] sendDatePicker sent=${sent}`);
     if (!sent) {
-      await thread.post(body);
+      await thread.post("Which day works for you? (e.g. 2026-05-15)");
+    }
+  }
+
+  async function sendNewPatientGate(): Promise<void> {
+    const sent = await sendReplyButtons(
+      extractPhone(thread),
+      "First time at this clinic, or have you been here before?",
+      [
+        { id: "new_patient_yes", title: "New patient" },
+        { id: "new_patient_no", title: "Existing patient" },
+      ]
+    );
+    console.log(`[DET] sendNewPatientGate sent=${sent}`);
+    if (!sent) {
+      await thread.post("First time at this clinic, or have you been here before? Reply 'new' or 'existing'.");
+    }
+  }
+
+  function clinicHasNewPatientLimit(): boolean {
+    const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
+    return clinicOpt?.newPatientLimit !== null && clinicOpt?.newPatientLimit !== undefined;
+  }
+
+  /** Move from doctor stage to either new-patient gate or directly to date. */
+  async function advanceToDateOrPatientGate(): Promise<void> {
+    if (clinicHasNewPatientLimit() && state.pendingIsNewPatient === undefined) {
+      await sendNewPatientGate();
+      return;
+    }
+    await sendDatePicker();
+  }
+
+  // Helper: after a service is fully picked (incl. method), drive the rest of
+  // the flow deterministically — show doctors if the clinic requires it,
+  // otherwise jump to the new-patient gate / date picker.
+  async function chainAfterServicePicked(): Promise<void> {
+    const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
+    if (clinicOpt?.doctorSelection) {
+      const docRaw = await (tools as any).get_clinic_doctors.execute({});
+      const docData = parseJsonSafe(docRaw);
+      const docPlan = buildInteractivePlanFromToolResults([{ toolName: "get_clinic_doctors", result: docRaw }], state);
+      const docSent = docPlan ? await sendInteractivePlan(extractPhone(thread), docPlan) : false;
+      console.log(`[DET] chain->doctors auto=${!!docData?.autoSelected} plan="${docPlan?.body ?? "-"}" sent=${docSent}`);
+      if (docSent) return;
+      if (docData?.autoSelected) {
+        await thread.post(docData.message ?? "Doctor selected.");
+        await advanceToDateOrPatientGate();
+        return;
+      }
+      await thread.post(typeof docData?.message === "string" ? docData.message : "Doctor selection unavailable.");
+      return;
+    }
+    await advanceToDateOrPatientGate();
+  }
+
+  // Helper: select_service was just called. Send method list if needed,
+  // otherwise chain to doctor stage. Returns false only if select_service
+  // returned an unexpected error shape — caller decides fallback message.
+  async function handleSelectServiceResult(raw: unknown, ctx: string): Promise<boolean> {
+    const data = parseJsonSafe(raw);
+    const plan = buildInteractivePlanFromToolResults([{ toolName: "select_service", result: raw }], state);
+    const sent = plan ? await sendInteractivePlan(extractPhone(thread), plan) : false;
+    console.log(`[DET] ${ctx} needsMethod=${!!data?.needsMethodSelection} plan="${plan?.body ?? "-"}" sent=${sent}`);
+    if (sent) return true;
+    if (data?.needsMethodSelection === true) {
+      await thread.post(PLAN_BODY.method);
+      return true;
+    }
+    if (data?.success) {
+      await chainAfterServicePicked();
+      return true;
+    }
+    return false;
+  }
+
+  if (interactiveReplyId?.startsWith("clinic_select_")) {
+    const index = parseIndexedReply(interactiveReplyId, "clinic_select_");
+    if (index) {
+      console.log(`[DET] clinic_select idx=${index} pendingType=${state.pendingSelectionType ?? "-"} pendingQuery="${state.pendingSelectionQuery ?? "-"}" lastSearch="${state.lastSearchQuery ?? "-"}"`);
+      // Deterministic refresh: if we have a clarified pending query,
+      // rebuild clinicOptions from that query before selecting clinic index.
+      if (
+        state.pendingSelectionType === "clinic" &&
+        state.pendingSelectionQuery &&
+        state.pendingSelectionQuery.trim().length > 0 &&
+        state.lastSearchQuery !== state.pendingSelectionQuery
+      ) {
+        await (tools as any).search_services.execute({ query: state.pendingSelectionQuery });
+        console.log(
+          `[GUARD] Refreshed clinicOptions from pendingSelectionQuery="${state.pendingSelectionQuery}" before clinic select`
+        );
+      } else if ((!state.clinicOptions || state.clinicOptions.length === 0) && state.pendingSelectionQuery) {
+        await (tools as any).search_services.execute({ query: state.pendingSelectionQuery });
+        console.log(`[GUARD] Recovered clinicOptions via pendingSelectionQuery="${state.pendingSelectionQuery}"`);
+      }
+      const raw = await (tools as any).select_clinic.execute({ index });
+
+      // Auto-select a service when:
+      //   1. user picked a service name via clarify_service_ and it exact-
+      //      matches a service at this clinic; OR
+      //   2. only one service option remains.
+      const clarified = state.pendingSelectionQuery?.trim().toLowerCase();
+      const opts = state.serviceOptions ?? [];
+      let matchIdx = clarified
+        ? opts.findIndex((s) => s.serviceName.trim().toLowerCase() === clarified)
+        : -1;
+      if (matchIdx < 0 && opts.length === 1) matchIdx = 0;
+
+      await updateState({ pendingSelectionType: undefined, pendingSelectionQuery: undefined });
+
+      if (matchIdx >= 0) {
+        console.log(
+          `[GUARD] Auto-selecting service "${opts[matchIdx].serviceName}" (idx=${matchIdx + 1}) from ${clarified ? "clarified pick" : "single option"}`
+        );
+        const svcRaw = await (tools as any).select_service.execute({ index: matchIdx + 1 });
+        const handled = await handleSelectServiceResult(svcRaw, "clinic_select->service");
+        if (handled) return;
+      }
+
+      // Fall back to the regular service list / message.
+      const plan = buildInteractivePlanFromToolResults([{ toolName: "select_clinic", result: raw }], state);
+      const sent = plan ? await sendInteractivePlan(extractPhone(thread), plan) : false;
+      console.log(`[DET] clinic_select done svcOpts=${state.serviceOptions?.length ?? 0} plan="${plan?.body ?? "-"}" sent=${sent}`);
+      if (sent) return;
+      const data = parseJsonSafe(raw);
+      if (Array.isArray(data?.services) && data.services.length === 0) {
+        await thread.post("Hmm, I couldn't find matching services at this clinic. Want to try another?");
+      } else {
+        await thread.post(PLAN_BODY.service);
+      }
+      return;
+    }
+  }
+
+  if (interactiveReplyId?.startsWith("service_select_")) {
+    const index = parseIndexedReply(interactiveReplyId, "service_select_");
+    if (index) {
+      const raw = await (tools as any).select_service.execute({ index });
+      const handled = await handleSelectServiceResult(raw, `service_select idx=${index}`);
+      if (handled) return;
+      await thread.post("Got it — let me continue with your booking.");
+      return;
+    }
+  }
+
+  if (interactiveReplyId?.startsWith("method_select_")) {
+    const methodIndex = parseIndexedReply(interactiveReplyId, "method_select_");
+    if (methodIndex && state.activeServiceId) {
+      const currentIdx = (state.serviceOptions ?? []).findIndex((s) => s.serviceId === state.activeServiceId);
+      const serviceIndex = currentIdx >= 0 ? currentIdx + 1 : null;
+      if (serviceIndex) {
+        const raw = await (tools as any).select_service.execute({ index: serviceIndex, methodIndex });
+        const handled = await handleSelectServiceResult(raw, `method_select methodIdx=${methodIndex}`);
+        if (handled) return;
+        await thread.post("Got it. What date and time would you like?");
+        return;
+      }
+      console.log(`[DET] method_select skipped methodIdx=${methodIndex} no_active_service`);
+    }
+  }
+
+  if (interactiveReplyId?.startsWith("doctor_select_")) {
+    const index = parseIndexedReply(interactiveReplyId, "doctor_select_");
+    if (index) {
+      const raw = await (tools as any).select_doctor.execute({ index });
+      const data = parseJsonSafe(raw);
+      console.log(`[DET] doctor_select idx=${index} success=${!!data?.success} name="${data?.doctorName ?? "-"}"`);
+      await thread.post(
+        data?.success
+          ? `Doctor selected: ${data.doctorName ?? "selected"}.`
+          : "Doctor selected."
+      );
+      await advanceToDateOrPatientGate();
+      return;
+    }
+  }
+
+  if (interactiveReplyId === "new_patient_yes" || interactiveReplyId === "new_patient_no") {
+    const isNew = interactiveReplyId === "new_patient_yes";
+    console.log(`[DET] new_patient_gate isNew=${isNew}`);
+    await updateState({ pendingIsNewPatient: isNew });
+    await sendDatePicker();
+    return;
+  }
+
+  if (interactiveReplyId === "date_select_other") {
+    console.log(`[DET] date_select_other`);
+    await updateState({ awaitingDate: true, awaitingTime: undefined });
+    await thread.post("Sure — type the date you'd like, in YYYY-MM-DD format (e.g. 2026-05-15).");
+    return;
+  }
+
+  // Helper: present time options for the given date — period buckets when
+  // there are too many to fit, otherwise a flat list.
+  async function presentTimesForDate(date: string): Promise<void> {
+    const raw = await (tools as any).get_clinic_availability.execute({ date });
+    const data = parseJsonSafe(raw);
+    if (data?.error) {
+      await thread.post(typeof data.error === "string" ? data.error : "Couldn't load clinic hours.");
+      await sendDatePicker();
+      return;
+    }
+    if (data?.open === false) {
+      await thread.post(typeof data.message === "string" ? data.message : `Clinic is closed on ${date}.`);
+      await sendDatePicker();
+      return;
+    }
+    const slots: string[] = Array.isArray(data?.freeSlots) ? data.freeSlots : [];
+    console.log(`[DET] presentTimesForDate date=${date} slots=${slots.length}`);
+    if (slots.length === 0) {
+      await thread.post(`No free time slots on ${humanDay(date)}. Please pick another date.`);
+      await sendDatePicker();
+      return;
+    }
+    // Up to 9 slots fit alongside an "Other time" row in one list.
+    const plan = slots.length <= 9
+      ? buildTimeListPlan(date, slots)
+      : buildPeriodPickerPlan(date, slots);
+    const sent = await sendInteractivePlan(extractPhone(thread), plan);
+    if (!sent) {
+      await thread.post(`Here's what's open on ${humanDay(date)}: ${slots.slice(0, 10).join(", ")}`);
+    }
+  }
+
+  // Helper: finalise a time pick — covers both interactive `time_select_*`
+  // and the typed-time fallback after `time_select_other`.
+  async function processSelectedTime(time: string): Promise<void> {
+    const date = state.pendingBookingDate;
+    if (!date) {
+      console.log(`[DET] processSelectedTime no_date time=${time}`);
+      await thread.post("I lost track of the date — let's pick it again.");
+      await sendDatePicker();
+      return;
+    }
+    const svc = (state.serviceOptions ?? []).find((s) => s.serviceId === state.activeServiceId);
+    const meth = svc?.methods.find((mm) => mm.methodId === state.activeMethodId);
+    if (meth?.requiresAddress) {
+      console.log(`[DET] processSelectedTime needs_address time=${time}`);
+      await updateState({
+        pendingBooking: {
+          date,
+          time,
+          isNewPatient: state.pendingIsNewPatient,
+          bookingType: "consultation",
+        },
+        awaitingAddress: true,
+        awaitingTime: undefined,
+      });
+      await thread.post(
+        `Got it — ${humanDay(date)} at ${time}. Please share the address for the visit.`
+      );
+      return;
+    }
+
+    const raw = await (tools as any).create_booking.execute({
+      date,
+      time,
+      isNewPatient: state.pendingIsNewPatient,
+      confirmed: false,
+    });
+    const data = parseJsonSafe(raw);
+    console.log(`[DET] processSelectedTime->stage time=${time} needsConfirmation=${!!data?.needsConfirmation}`);
+    await updateState({ awaitingTime: undefined });
+
+    const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
+    const doctor = (state.doctorOptions ?? []).find((d) => d.doctorId === state.activeDoctorId);
+    const patient = (state.patients ?? []).find((p) => p.id === state.activePatientId);
+    const summary = [
+      "Here are your booking details — does this look right?",
+      patient ? `Patient: ${patient.name}` : null,
+      clinicOpt ? `Clinic: ${clinicOpt.clinicName}` : null,
+      svc ? `Service: ${svc.serviceName}${meth?.methodName ? ` (${meth.methodName})` : ""}` : null,
+      doctor ? `Doctor: ${doctor.name}` : null,
+      `Date: ${humanDay(date)}`,
+      `Time: ${time}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const sent = await sendReplyButtons(extractPhone(thread), summary, [
+      { id: "booking_confirm_yes", title: "Yes, confirm" },
+      { id: "booking_confirm_no", title: "Change details" },
+    ]);
+    if (!sent) await thread.post(summary);
+  }
+
+  if (interactiveReplyId?.startsWith("date_select_")) {
+    const date = interactiveReplyId.replace("date_select_", "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      console.log(`[DET] date_select bad-format id=${interactiveReplyId}`);
+    } else {
+      console.log(`[DET] date_select date=${date}`);
+      await updateState({ pendingBookingDate: date, awaitingTime: undefined });
+      await presentTimesForDate(date);
+      return;
+    }
+  }
+
+  if (interactiveReplyId?.startsWith("period_select_")) {
+    const period = interactiveReplyId.replace("period_select_", "") as Period;
+    const date = state.pendingBookingDate;
+    if (!date || !["morning", "afternoon", "evening"].includes(period)) {
+      console.log(`[DET] period_select invalid period=${period} date=${date ?? "-"}`);
+      await sendDatePicker();
+      return;
+    }
+    const raw = await (tools as any).get_clinic_availability.execute({ date });
+    const data = parseJsonSafe(raw);
+    const slots: string[] = Array.isArray(data?.freeSlots) ? data.freeSlots : [];
+    const filtered = bucketSlotsByPeriod(slots)[period];
+    console.log(`[DET] period_select period=${period} slots=${filtered.length}`);
+    if (filtered.length === 0) {
+      await thread.post(`No ${PERIOD_LABELS[period].toLowerCase()} slots on ${humanDay(date)}.`);
+      await presentTimesForDate(date);
+      return;
+    }
+    const plan = buildTimeListPlan(date, filtered, PERIOD_LABELS[period]);
+    const sent = await sendInteractivePlan(extractPhone(thread), plan);
+    if (!sent) {
+      await thread.post(`${PERIOD_LABELS[period]} times: ${filtered.slice(0, 10).join(", ")}`);
     }
     return;
   }
 
+  if (interactiveReplyId === "time_select_other") {
+    console.log(`[DET] time_select_other`);
+    await updateState({ awaitingTime: true });
+    await thread.post("Please type your preferred time in HH:mm format (e.g. 14:30).");
+    return;
+  }
+
+  if (interactiveReplyId?.startsWith("time_select_")) {
+    const m = /^time_select_(\d{2})(\d{2})$/.exec(interactiveReplyId);
+    if (m) {
+      const time = `${m[1]}:${m[2]}`;
+      await processSelectedTime(time);
+      return;
+    }
+  }
+
+  // Used downstream to force a search if the LLM replies with bare text on a
+  // booking-intent message. Kept broad on purpose.
   const looksLikeNewBookingIntent =
     !isInteractiveClick &&
     !incomingLocation &&
     /\b(book|booking|appointment|schedule|checkup|consult)\b/i.test(incomingText);
+
+  // Stale-clear must be conservative: mid-flow free text (e.g. "ok let me
+  // book at 3pm") used to wipe state. Now only an explicit reset phrase or
+  // a session-gap clears active selections.
+  const looksLikeExplicitReset =
+    !isInteractiveClick &&
+    !incomingLocation &&
+    /\b(start over|reset|new booking|cancel (this|the) booking|different clinic|change clinic|change service|nevermind|never mind)\b/i.test(incomingText);
   const sessionBoundaryHit = sessionStart > 0;
 
-  // Clear stale booking selections when:
-  //  - a new session starts (long idle gap), OR
-  //  - the user explicitly starts a new booking intent via typed text.
-  // Do NOT clear on interactive button clicks — those are continuations
-  // of an in-flight flow.
   if (
-    !isInteractiveClick &&
     !deepLinkApplied &&
-    (sessionBoundaryHit || looksLikeNewBookingIntent) &&
+    (sessionBoundaryHit || looksLikeExplicitReset) &&
     (state.activeClinicId || state.activeServiceId)
   ) {
     console.log(
-      `[BOT] Clearing stale active selections (sessionBoundary=${sessionBoundaryHit} newBookingIntent=${looksLikeNewBookingIntent})`
+      `[BOT] Clearing stale active selections (sessionBoundary=${sessionBoundaryHit} explicitReset=${looksLikeExplicitReset})`
     );
     await updateState({
       activeClinicId: undefined,
@@ -723,6 +1474,12 @@ export async function handleMessage(thread: any, message: any) {
       doctorOptions: undefined,
       lastSearchQuery: undefined,
       lastLocation: undefined,
+      pendingBooking: undefined,
+      pendingBookingDate: undefined,
+      pendingIsNewPatient: undefined,
+      awaitingAddress: undefined,
+      awaitingTime: undefined,
+      awaitingDate: undefined,
     });
   }
 
@@ -735,10 +1492,35 @@ export async function handleMessage(thread: any, message: any) {
     ? sessionMessages.slice(-MAX_SESSION_MESSAGES)
     : sessionMessages;
   const history = await toAiMessages(messages);
-  const normalizedButtonReply = mapInteractiveReplyToText(
-    extractInteractiveReplyId(activeMessage),
-    state
-  );
+  const replyIdForFallback = extractInteractiveReplyId(activeMessage);
+  const deterministicTapPrefixes = [
+    "patient_select_",
+    "clinic_select_",
+    "service_select_",
+    "method_select_",
+    "doctor_select_",
+    "clarify_service_",
+    "date_select_",
+    "time_select_",
+    "period_select_",
+    "view_booking:",
+  ];
+  const deterministicTapIds = new Set([
+    "NEAR_ME",
+    "booking_confirm_yes",
+    "booking_confirm_no",
+    "date_select_other",
+    "time_select_other",
+    "new_patient_yes",
+    "new_patient_no",
+  ]);
+  const shouldSkipFallbackMap =
+    !!replyIdForFallback &&
+    (deterministicTapIds.has(replyIdForFallback) ||
+      deterministicTapPrefixes.some((p) => replyIdForFallback.startsWith(p)));
+  const normalizedButtonReply = shouldSkipFallbackMap
+    ? undefined
+    : mapInteractiveReplyToText(replyIdForFallback);
   if (normalizedButtonReply) {
     const lastMessage = (history as any[])[history.length - 1];
     const lastContent = typeof lastMessage?.content === "string" ? lastMessage.content : "";
@@ -755,8 +1537,7 @@ export async function handleMessage(thread: any, message: any) {
     }
   }
 
-  console.log("[LLM] System Prompt:", systemPrompt);
-  console.log("[LLM] History:", JSON.stringify(history, null, 2));
+  console.log(`[LLM] History len=${history.length} last="${clip(String((history as any[])[history.length - 1]?.content ?? ""), 80)}"`);
 
   try {
     let lastToolResults: any[] | undefined;
@@ -764,15 +1545,17 @@ export async function handleMessage(thread: any, message: any) {
       system: systemPrompt,
       tools,
       onStepFinish({ text, toolCalls, toolResults, finishReason }) {
-        console.log("[LLM STEP] Finish Reason:", finishReason);
-        if (text) console.log("[LLM STEP] Response:", text);
-        if (toolCalls?.length)
-          console.log("[LLM STEP] Tool Calls:", JSON.stringify(toolCalls, null, 2));
-        if (toolResults?.length)
-          console.log(
-            "[LLM STEP] Tool Results:",
-            JSON.stringify(toolResults, null, 2)
-          );
+        const calls = (toolCalls ?? []).map((c: any) => `${c.toolName}(${clip(JSON.stringify(c.input ?? {}), 80)})`).join(", ");
+        const results = (toolResults ?? []).map((r: any) => {
+          const out = typeof r.output === "string" ? r.output : JSON.stringify(r.output ?? "");
+          return `${r.toolName}=>${clip(out, 120)}`;
+        }).join(" | ");
+        console.log(
+          `[LLM STEP] finish=${finishReason}` +
+          (text ? ` text="${clip(text, 120)}"` : "") +
+          (calls ? ` calls=[${calls}]` : "") +
+          (results ? ` results=[${results}]` : "")
+        );
         if (toolResults?.length) {
           lastToolResults = toolResults as any[];
         }
@@ -781,24 +1564,60 @@ export async function handleMessage(thread: any, message: any) {
       messages: history,
     });
 
-    if (result.text) {
-      const planFromTools = buildInteractivePlanFromToolResults(lastToolResults, state);
+    let effectiveText = result.text ?? "";
+    let effectiveToolResults = lastToolResults;
+
+    // If any tool returned the alreadyInProgress guard, the LLM tends to
+    // emit a confused "I can't continue" sentence. Drop that text so the
+    // state-derived plan body (e.g. "Please choose a service.") is shown.
+    const hadAlreadyInProgress = (effectiveToolResults ?? []).some((r: any) => {
+      const data = parseJsonSafe(r?.result ?? r?.output ?? r?.toolResult ?? r?.value);
+      return data && typeof data === "object" && (data as any).alreadyInProgress === true;
+    });
+    if (hadAlreadyInProgress) {
+      console.log("[GUARD] Dropping LLM text after alreadyInProgress; will re-render current step.");
+      effectiveText = "";
+    }
+
+    // Guardrail: if the model replies with plain text on a fresh booking
+    // intent (without calling tools), force a real search to avoid invented
+    // service/clinic options.
+    if (
+      !effectiveToolResults?.length &&
+      !isInteractiveClick &&
+      looksLikeNewBookingIntent &&
+      !state.activeClinicId &&
+      !state.activeServiceId &&
+      incomingText.trim().length > 0
+    ) {
+      try {
+        const forcedRaw = await (tools as any).search_services.execute({ query: incomingText.trim() });
+        effectiveToolResults = [{ toolName: "search_services", result: forcedRaw }];
+        effectiveText = "";
+        console.log("[GUARD] Forced search_services after text-only booking reply.");
+      } catch (forceErr) {
+        console.warn("[GUARD] Forced search_services failed:", forceErr);
+      }
+    }
+
+    if (effectiveText || effectiveToolResults?.length) {
+      const planFromTools = buildInteractivePlanFromToolResults(effectiveToolResults, state);
       const planFromState = planFromTools ? undefined : buildInteractivePlanFromState(state);
       const selectionPlan = planFromTools ?? planFromState;
-      const lastToolName = lastToolResults?.length
+      const lastToolName = effectiveToolResults?.length
         ? String(
-            (lastToolResults[lastToolResults.length - 1] as any)?.toolName ?? "?"
-          )
+          (effectiveToolResults[effectiveToolResults.length - 1] as any)?.toolName ?? "?"
+        )
         : "(none)";
       console.log(
-        `[INTERACTIVE] decide tools=${lastToolResults?.length ?? 0} lastTool=${lastToolName} ` +
-          `state{cli=${!!state.activeClinicId} svc=${!!state.activeServiceId} mtd=${!!state.activeMethodId} doc=${!!state.activeDoctorId} pat=${!!state.activePatientId} | clinicOpts=${state.clinicOptions?.length ?? 0} svcOpts=${state.serviceOptions?.length ?? 0}} ` +
-          `planTools=${planFromTools ? planFromTools.body : "-"} planState=${planFromState ? planFromState.body : "-"}`
+        `[INTERACTIVE] decide tools=${effectiveToolResults?.length ?? 0} lastTool=${lastToolName} ` +
+        `state{cli=${!!state.activeClinicId} svc=${!!state.activeServiceId} mtd=${!!state.activeMethodId} doc=${!!state.activeDoctorId} pat=${!!state.activePatientId} | clinicOpts=${state.clinicOptions?.length ?? 0} svcOpts=${state.serviceOptions?.length ?? 0}} ` +
+        `planTools=${planFromTools ? planFromTools.body : "-"} planState=${planFromState ? planFromState.body : "-"}`
       );
       const wantsLocationRequest = (() => {
-        if (!lastToolResults?.length) return false;
-        for (let i = lastToolResults.length - 1; i >= 0; i--) {
-          const raw = lastToolResults[i] ?? {};
+        if (!effectiveToolResults?.length) return false;
+        for (let i = effectiveToolResults.length - 1; i >= 0; i--) {
+          const raw = effectiveToolResults[i] ?? {};
           const toolName = String(raw.toolName ?? raw.tool ?? raw.name ?? "");
           if (toolName !== "search_services_near_me") continue;
           const data = parseJsonSafe(raw.result ?? raw.output ?? raw.toolResult ?? raw.value);
@@ -810,27 +1629,48 @@ export async function handleMessage(thread: any, message: any) {
         return false;
       })();
       if (selectionPlan) {
-        const sent = await sendInteractivePlan(extractPhone(thread), selectionPlan, result.text);
+        let pendingType: ThreadState["pendingSelectionType"] | undefined;
+        let pendingQuery: string | undefined;
+        if (selectionPlan.body === PLAN_BODY.serviceClarify) {
+          pendingType = "service_clarify";
+          pendingQuery = incomingText.trim() || state.lastSearchQuery;
+        } else if (selectionPlan.body === PLAN_BODY.clinic) {
+          pendingType = "clinic";
+          pendingQuery = state.lastSearchQuery;
+        }
+        if (pendingType) {
+          await updateState({ pendingSelectionType: pendingType, pendingSelectionQuery: pendingQuery });
+        }
+        // For the service-clarify plan the LLM tends to mix clinic and service
+        // language ("here are clinics that offer …") even though the user only
+        // needs to disambiguate the service type. Use the plan body alone to
+        // keep the prompt focused.
+        const useBodyOverride = selectionPlan.body !== PLAN_BODY.serviceClarify;
+        const sent = await sendInteractivePlan(
+          extractPhone(thread),
+          selectionPlan,
+          useBodyOverride ? effectiveText : undefined
+        );
         console.log(`[INTERACTIVE] sent list "${selectionPlan.body}" success=${sent}`);
         if (!sent) {
-          await thread.post(result.text);
+          await thread.post(useBodyOverride ? effectiveText : selectionPlan.body);
         }
       } else if (wantsLocationRequest) {
-        const sent = await sendLocationRequest(extractPhone(thread), result.text);
+        const sent = await sendLocationRequest(extractPhone(thread), effectiveText);
         console.log(`[INTERACTIVE] sent location_request success=${sent}`);
         if (!sent) {
-          await thread.post(result.text);
+          await thread.post(effectiveText);
         }
-      } else if (shouldSendBookingConfirmButtons(result.text, state)) {
-        const sent = await sendReplyButtons(extractPhone(thread), result.text, [
+      } else if (shouldSendBookingConfirmButtons(effectiveText, state)) {
+        const sent = await sendReplyButtons(extractPhone(thread), effectiveText, [
           { id: "booking_confirm_yes", title: "Yes, confirm" },
           { id: "booking_confirm_no", title: "Change details" },
         ]);
         if (!sent) {
-          await thread.post(result.text);
+          await thread.post(effectiveText);
         }
       } else {
-        await thread.post(result.text);
+        await thread.post(effectiveText);
       }
     } else {
       await thread.post(

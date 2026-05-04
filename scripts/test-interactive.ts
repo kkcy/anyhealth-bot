@@ -89,6 +89,49 @@ function pickTimeFromAssistantText(text: string, exclude: Set<string>): string |
 
 const CASES: CaseSpec[] = [
   {
+    id: "deterministic-clarify-clinic-service",
+    phone: process.env.SMOKE_PHONE ?? "60174421238",
+    async run(thread, ctx) {
+      const start = await ctx.step("user asks checkup with fever", async () => {
+        await deliverUserText(thread, "make an appointment for checkup, i have a fever");
+      });
+      const clarifyList = start.captured.find(
+        (c) => c.kind === "list" && c.options.some((o) => /^clarify_service_/i.test(o.id))
+      );
+      ctx.expect(!!clarifyList, "expected clarification list first");
+      const clarifyPick =
+        clarifyList?.options.find((o) => /General Consultation/i.test(o.id) || /General Consultation/i.test(o.title))?.id ??
+        clarifyList?.options[0]?.id;
+      ctx.expect(!!clarifyPick, "expected a clarification option id");
+
+      const afterClarify = await ctx.step("click clarified service", async () => {
+        if (clarifyPick) await deliverInteractiveReply(thread, clarifyPick);
+      });
+      const clinicList = afterClarify.captured.find(
+        (c) => c.kind === "list" && c.options.some((o) => /^clinic_select_/i.test(o.id))
+      );
+      ctx.expect(!!clinicList, "expected clinic list after clarification pick");
+      const clinicPick = clinicList?.options.find((o) => /clinic_select_/i.test(o.id))?.id;
+      ctx.expect(!!clinicPick, "expected clinic_select option");
+
+      const afterClinic = await ctx.step("click clinic", async () => {
+        if (clinicPick) await deliverInteractiveReply(thread, clinicPick);
+      });
+      const serviceList = afterClinic.captured.find(
+        (c) => c.kind === "list" && c.options.some((o) => /^service_select_/i.test(o.id))
+      );
+      ctx.expect(!!serviceList, "expected service list after clinic pick");
+      const reClarified = afterClinic.captured.some(
+        (c) => c.kind === "list" && c.options.some((o) => /^clarify_service_/i.test(o.id))
+      );
+      ctx.expect(!reClarified, "should not ask service clarification again after clinic pick");
+      ctx.expect(
+        (thread._state?.serviceOptions?.length ?? 0) > 0,
+        "expected serviceOptions populated after clinic pick"
+      );
+    },
+  },
+  {
     id: "clinic-list-then-click",
     phone: process.env.SMOKE_PHONE ?? "60174421238",
     async run(thread, ctx) {

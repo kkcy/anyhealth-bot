@@ -17,6 +17,7 @@
     "test:near-me": "tsx scripts/test-near-me.ts",
     "test:geo": "tsx scripts/test-geo.ts",
     "test:interactive": "bun --tsconfig-override tsconfig.json scripts/test-interactive.ts",
+    "test:deterministic-taps": "bun --tsconfig-override tsconfig.json scripts/test-interactive.ts deterministic-clarify-clinic-service",
     "test:reminder-time": "tsx --tsconfig tsconfig.json scripts/test-reminder-time.ts",
     "test:error-classifier": "tsx --tsconfig tsconfig.json scripts/test-error-classifier.ts",
     "test:reminder-optout": "tsx --tsconfig tsconfig.json scripts/test-reminder-optout.ts",
