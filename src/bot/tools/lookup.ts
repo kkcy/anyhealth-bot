@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
 import type { ThreadState, ClinicOption, ServiceOption, MethodOption, DoctorOption } from "@/types";
 import { haversineKm } from "@/lib/geo";
+import { buildServiceOptions, collectMethodIds, type MethodMap, type RawServiceRow } from "./service-options";
 
 export function createLookupTools(
   state: ThreadState,
@@ -83,58 +84,29 @@ export function createLookupTools(
       .or(orConditions)
       .limit(10);
 
-    const allServices = [...(cServices ?? []), ...(tcmServices ?? [])];
+    const allServices = [...(cServices ?? []), ...(tcmServices ?? [])] as RawServiceRow[];
 
-    // Fetch method details
-    const methodIds = new Set<string>();
-    for (const svc of allServices) {
-      for (let i = 1; i <= 8; i++) {
-        const mid = (svc as any)[`method_${i}`] as string | null;
-        if (mid) methodIds.add(mid);
-      }
-    }
-
-    let methodMap: Record<string, { id: string; method_name: string; priority: boolean; address: boolean }> = {};
-    if (methodIds.size > 0) {
+    const methodIds = collectMethodIds(allServices);
+    let methodMap: MethodMap = {};
+    if (methodIds.length > 0) {
       const { data: methods } = await supabase
         .from("c_a_service_method")
         .select("id, method_name, priority, address")
-        .in("id", Array.from(methodIds));
+        .in("id", methodIds);
       if (methods) {
         methodMap = Object.fromEntries(methods.map((m) => [m.id, m]));
       }
     }
 
-    const serviceOptions: ServiceOption[] = allServices.map((svc) => {
-      const svcMethods: MethodOption[] = [];
-      for (let i = 1; i <= 8; i++) {
-        const mid = (svc as any)[`method_${i}`] as string | null;
-        if (mid && methodMap[mid]) {
-          const m = methodMap[mid];
-          svcMethods.push({
-            methodId: m.id,
-            methodName: m.method_name,
-            requiresTime: m.priority,
-            requiresAddress: m.address,
-          });
-        }
-      }
-
-      return {
-        serviceId: svc.id,
-        serviceName: svc.service_name,
-        description: svc.description ?? "",
-        durationMinutes: svc.duration_minutes,
-        price: svc.price,
-        methods: svcMethods,
-      };
-    });
+    const serviceOptions: ServiceOption[] = buildServiceOptions(allServices, methodMap);
 
     await updateState({ serviceOptions });
 
     return JSON.stringify({
       clinic: clinic.clinicName,
       address: clinic.clinicAddress,
+      resultType: "matching_services",
+      searchQuery: query,
       services: serviceOptions.map((s, i) => ({
         index: i + 1,
         name: s.serviceName,
@@ -144,7 +116,10 @@ export function createLookupTools(
           ? s.methods.map((m) => m.methodName)
           : ["In-clinic visit"],
       })),
-      instruction: "Present these services to the user. When they choose, call select_service with the index number.",
+      instruction:
+        "Present these as matching services for the user's request, not as the clinic's complete service catalogue. " +
+        "Do not say 'offers the following services'. Say 'I found these matching services'. " +
+        "When the user chooses, call select_service with the index number.",
     });
   }
 

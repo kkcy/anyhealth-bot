@@ -1,6 +1,8 @@
 import { getSupabase } from "../supabase";
 import type { BookingForReminder } from "./types";
 
+type ReminderLoaderClient = ReturnType<typeof getSupabase>;
+
 /**
  * Loads a c_s_bookings row joined with the data the reminder layer needs:
  * - clinic (via doctor_id -> c_a_doctors.clinic_id -> c_a_clinics)
@@ -15,8 +17,13 @@ import type { BookingForReminder } from "./types";
 export async function getBookingForReminder(
   bookingId: string,
 ): Promise<BookingForReminder | null> {
-  const sb = getSupabase();
+  return getBookingForReminderWithClient(getSupabase(), bookingId);
+}
 
+export async function getBookingForReminderWithClient(
+  sb: ReminderLoaderClient,
+  bookingId: string,
+): Promise<BookingForReminder | null> {
   const { data: b, error } = await sb
     .from("c_s_bookings")
     .select(`
@@ -28,13 +35,13 @@ export async function getBookingForReminder(
     .maybeSingle();
 
   if (error || !b) return null;
-  const doctor = b.doctor as { id: string; name: string; clinic_id: string } | null;
+  const doctor = b.doctor as unknown as { id: string; name: string; clinic_id: string } | null;
   if (!doctor?.clinic_id) return null;
 
   const [{ data: clinic }, { data: user }] = await Promise.all([
     sb.from("c_a_clinics").select("id, name").eq("id", doctor.clinic_id).maybeSingle(),
     sb.from("whatsapp_users")
-      .select("id, whatsapp_number, name")
+      .select("id, whatsapp_number, user_name")
       .eq("id", b.user_id)
       .maybeSingle(),
   ]);
@@ -51,7 +58,7 @@ export async function getBookingForReminder(
     user_id: b.user_id,
     clinic_id: doctor.clinic_id,
     doctor_name: doctor.name ?? null,
-    patient_name: (user.name as string) ?? "there",
+    patient_name: (user.user_name as string) ?? "there",
     clinic_name: clinic.name as string,
     phone: stripPlus(user.whatsapp_number as string),
     status: b.status as string,

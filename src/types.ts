@@ -26,7 +26,7 @@ export interface ServiceOption {
 }
 
 export interface MethodOption {
-  methodId: string;
+  methodId?: string;
   methodName: string;
   requiresTime: boolean;
   requiresAddress: boolean;
