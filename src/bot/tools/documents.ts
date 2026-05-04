@@ -167,7 +167,7 @@ export function createDocumentTools(
 
         // Search for matching patient linked to this user
         const { data: patients, error } = await supabase
-          .from("patient_id")
+          .from("patient")
           .select("id, patient_name, ic_passport")
           .eq("wa_user_id", state.userId);
 
@@ -242,7 +242,7 @@ export function createDocumentTools(
 
         // 1) Resolve all patient IDs under this WhatsApp user.
         const { data: linkedPatients, error: linkedPatientError } = await supabase
-          .from("patient_id")
+          .from("patient")
           .select("id, patient_name")
           .eq("wa_user_id", state.userId);
         if (linkedPatientError) {

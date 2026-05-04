@@ -44,14 +44,14 @@ export async function handleButtonAction(
   if (!ctx.thread.userId) {
     const sb = getSupabase();
     const { data: user } = await sb
-      .from("whatsapp_users")
+      .from("wa_user")
       .select("id, language")
-      .or(`whatsapp_number.eq.${ctx.phone},whatsapp_number.eq.+${ctx.phone}`)
+      .or(`phone_number.eq.${ctx.phone},phone_number.eq.+${ctx.phone}`)
       .maybeSingle();
 
     if (user) {
       const { data: patients } = await sb
-        .from("patient_id")
+        .from("patient")
         .select("id, patient_name, ic_passport")
         .eq("wa_user_id", user.id);
 
