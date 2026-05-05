@@ -1454,7 +1454,10 @@ export async function handleMessage(thread: any, message: any) {
     !isInteractiveClick &&
     !incomingLocation &&
     /\b(start over|reset|new booking|cancel (this|the) booking|different clinic|change clinic|change service|nevermind|never mind)\b/i.test(incomingText);
-  const sessionBoundaryHit = sessionStart > 0;
+  // Only trigger on the turn where the gap actually opened, not every
+  // subsequent turn — otherwise mid-flow state (awaitingTime, active
+  // selections) gets wiped on every message after a historical gap.
+  const sessionBoundaryHit = sessionStart > 0 && sessionStart === allMessages.length - 1;
 
   if (
     !deepLinkApplied &&
