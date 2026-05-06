@@ -27,6 +27,49 @@ function hasOverlap(startA: number, durationA: number, startB: number, durationB
   return startA < endB && startB < endA;
 }
 
+type IntentArgs = {
+  serviceKeyword?: string;
+  date?: string;
+  time?: string;
+  method?: "in_clinic" | "house_call" | "video";
+  isNewPatient?: boolean;
+};
+
+function isPastDate(iso: string): boolean {
+  const tz = process.env.CLINIC_TIMEZONE || "Asia/Kuala_Lumpur";
+  const now = new Date();
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const todayIso = fmt.format(now);
+  return iso < todayIso;
+}
+
+function evaluateIntentGuard(state: ThreadState, args: IntentArgs): string | null {
+  const hasConfirmCardDiff =
+    !!state.pendingBooking &&
+    ((args.time !== undefined && args.time !== state.pendingBooking.time) ||
+      (args.date !== undefined && args.date !== state.pendingBookingDate) ||
+      (args.isNewPatient !== undefined && args.isNewPatient !== state.pendingIsNewPatient));
+
+  if (hasConfirmCardDiff) return null;
+
+  if (state.pendingBooking) return "pendingBooking";
+  if (state.activeBookingId) return "activeBookingId";
+  if (state.pendingDocRetrievalBookingId) return "pendingDocRetrievalBookingId";
+  if (state.activeServiceId) return "activeServiceId";
+  if (state.awaitingAddress) return "awaitingAddress";
+  if (state.awaitingTime) return "awaitingTime";
+  if (state.awaitingDate) return "awaitingDate";
+  if (state.awaitingDocVerification) return "awaitingDocVerification";
+  if (state.awaitingRemark) return "awaitingRemark";
+
+  return null;
+}
+
 type ServiceInfoForBooking = {
   id: string;
   price: number | null;
@@ -316,6 +359,7 @@ export function createBookingTools(
           awaitingAddress: undefined,
           awaitingTime: undefined,
           awaitingDate: undefined,
+          extractedIntent: undefined,
         });
 
         // Best-effort reminder enqueue. Never blocks user-facing booking confirmation.
@@ -337,6 +381,70 @@ export function createBookingTools(
           clinicName: clinic?.name ?? null,
           clinicAddress: clinic?.address ?? null,
           message: "Booking created successfully. The clinic will confirm your appointment.",
+        });
+      },
+    }),
+
+    extract_booking_intent: tool({
+      description:
+        "Extract pre-filled booking slots from a user's free-text message. " +
+        "Call this BEFORE search_services whenever the message mentions a service, date, or time. " +
+        "Pass only slots you can extract with confidence. Returns a directive telling you which tool to call next.",
+      inputSchema: z.object({
+        serviceKeyword: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Service the user wants, as a search keyword (e.g. 'gp', 'flu shot', 'house call'). Pass user's exact words; do NOT translate or canonicalize."
+          ),
+        date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional()
+          .describe("ISO date YYYY-MM-DD. Resolve relative dates against the Today line in the system prompt."),
+        time: z
+          .string()
+          .regex(/^\d{2}:\d{2}$/)
+          .optional()
+          .describe("24h HH:mm. Convert '9am' to '09:00', '3pm' to '15:00'."),
+        method: z
+          .enum(["in_clinic", "house_call", "video"])
+          .optional()
+          .describe("Only if the user explicitly mentioned it."),
+        isNewPatient: z
+          .boolean()
+          .optional()
+          .describe("Only if the user said 'new patient' / 'first visit' / similar."),
+      }),
+      execute: async ({ serviceKeyword, date, time, method, isNewPatient }) => {
+        const skipReason = evaluateIntentGuard(state, { serviceKeyword, date, time, method, isNewPatient });
+        if (skipReason) {
+          return JSON.stringify({ skipped: true, reason: skipReason });
+        }
+
+        if (date !== undefined && isPastDate(date)) {
+          return JSON.stringify({ error: "date_in_past" });
+        }
+
+        const merged: NonNullable<ThreadState["extractedIntent"]> = {
+          ...(state.extractedIntent ?? {}),
+        };
+        if (serviceKeyword !== undefined) merged.serviceKeyword = serviceKeyword;
+        if (date !== undefined) merged.date = date;
+        if (time !== undefined) merged.time = time;
+        if (method !== undefined) merged.method = method;
+        if (isNewPatient !== undefined) merged.isNewPatient = isNewPatient;
+
+        await updateState({ extractedIntent: merged });
+
+        const nextAction = merged.serviceKeyword ? "search_services" : null;
+        const nextArgs = merged.serviceKeyword ? { query: merged.serviceKeyword } : null;
+
+        return JSON.stringify({
+          extracted: merged,
+          nextAction,
+          nextArgs,
         });
       },
     }),
