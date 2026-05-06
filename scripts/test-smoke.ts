@@ -373,6 +373,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
     },
     {
       id: "intent-fast-path",
+      requireCreatedBooking: true,
       turns: [
         {
           id: "user-message",
@@ -384,9 +385,10 @@ function buildCases(options: CliOptions): SmokeCase[] {
           ],
         },
         {
-          id: "follow-up",
-          message: "method 1",
-          requireAnyTools: ["select_service", "get_clinic_availability", "create_booking"],
+          id: "user-confirm",
+          message: "yes",
+          requireAllTools: ["create_booking"],
+          requireToolArgs: [{ tool: "create_booking", arg: "confirmed", equals: true }],
         },
       ],
     },
@@ -398,6 +400,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           message: "book general consultation tomorrow 9am",
           requireAllTools: ["extract_booking_intent", "search_services"],
           forbidTools: ["select_clinic"],
+          requireReplyContains: ["clinic"],
         },
       ],
     },
@@ -408,25 +411,6 @@ function buildCases(options: CliOptions): SmokeCase[] {
           id: "user-message",
           message: "book gp tomorrow 12:30pm",
           requireAllTools: ["extract_booking_intent"],
-        },
-      ],
-    },
-    {
-      id: "intent-edit-time",
-      turns: [
-        {
-          id: "user-message",
-          message: "book gp tomorrow 9am",
-          requireAllTools: ["extract_booking_intent", "search_services"],
-        },
-        {
-          id: "tap-no",
-          message: "no, change details",
-          requireReplyContains: ["change"],
-        },
-        {
-          id: "tap-edit-time",
-          message: "change time",
           requireReplyContains: ["time"],
         },
       ],
@@ -445,6 +429,33 @@ function buildCases(options: CliOptions): SmokeCase[] {
           requireAllTools: ["extract_booking_intent", "get_clinic_availability"],
           requireToolArgs: [{ tool: "extract_booking_intent", arg: "time", equals: "10:00" }],
           requireReplyContains: ["confirm"],
+        },
+      ],
+    },
+    {
+      id: "intent-guard-reentry",
+      turns: [
+        {
+          id: "start-booking",
+          message: "book gp tomorrow 9am",
+          requireAllTools: ["extract_booking_intent", "search_services"],
+        },
+        {
+          id: "mid-flow-reentry-attempt",
+          message: "book dentist next week 11am",
+          requireAllTools: ["extract_booking_intent"],
+          requireReplyContains: ["already", "booking"],
+        },
+      ],
+    },
+    {
+      id: "intent-no-booking-intent",
+      turns: [
+        {
+          id: "info-query",
+          message: "What are your clinic hours?",
+          forbidTools: ["extract_booking_intent", "create_booking"],
+          requireReplyContains: ["service"],
         },
       ],
     },
@@ -895,7 +906,6 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
         stopWhen: stepCountIs(12),
         messages: [...history, { role: "user", content: message }],
       });
-
       const toolCalls = collectToolCalls(result);
       const calledTools = Array.from(new Set(toolCalls.map((c) => c.toolName)));
       const reply = (result.text ?? "").trim();

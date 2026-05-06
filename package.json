@@ -10,6 +10,8 @@
     "test:tools": "tsx --tsconfig tsconfig.json scripts/test-tools.ts",
     "test:guards": "tsx --tsconfig tsconfig.json scripts/test-guards.ts",
     "test:smoke": "tsx --tsconfig tsconfig.json scripts/test-smoke.ts",
+    "test:smoke-bot": "bun run scripts/test-smoke-bot.ts",
+    "test:smoke:all": "bun run test:smoke && bun run test:smoke-bot",
     "test:friendly-prefill": "tsx --tsconfig tsconfig.json scripts/test-friendly-prefill.ts",
     "test:deep-link-parser": "tsx --tsconfig tsconfig.json scripts/test-deep-link-parser.ts",
     "test:deep-link": "tsx --tsconfig tsconfig.json scripts/test-deep-link.ts",
