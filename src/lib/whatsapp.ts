@@ -312,4 +312,41 @@ export async function sendTemplate(args: {
 
   return classifyMetaError({ http: res.status, metaCode, body });
 }
+export async function getWhatsAppMediaUrl(mediaId: string): Promise<string> {
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!accessToken) throw new Error("Missing WHATSAPP_ACCESS_TOKEN");
 
+  const res = await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Failed to get WhatsApp media URL (${res.status}): ${detail}`);
+  }
+
+  const data = await res.json();
+  if (!data.url) throw new Error("WhatsApp media response missing URL");
+  return data.url;
+}
+
+let _testMediaOverride: ((mediaId: string) => Promise<{ buffer: Buffer; contentType: string }>) | null = null;
+export function setTestMediaOverride(fn: typeof _testMediaOverride) { _testMediaOverride = fn; }
+
+export async function downloadWhatsAppMedia(mediaId: string): Promise<{ buffer: Buffer; contentType: string }> {
+  if (_testMediaOverride) return _testMediaOverride(mediaId);
+  const url = await getWhatsAppMediaUrl(mediaId);
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to download WhatsApp media (${res.status})`);
+  }
+
+  const contentType = res.headers.get("content-type") || "image/jpeg";
+  const arrayBuffer = await res.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), contentType };
+}

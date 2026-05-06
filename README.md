@@ -1,6 +1,6 @@
 # AnyHealth WhatsApp Chatbot
 
-A WhatsApp chatbot for AnyHealth patients to discover services, book appointments, manage bookings, retrieve consultation documents, and query insurance policies.
+A WhatsApp chatbot for AnyHealth patients to discover services, book appointments, manage bookings, retrieve consultation documents, query insurance policies, and log meal nutrition from food photos.
 
 ## Status
 
@@ -46,6 +46,11 @@ Retrieve consultation reports by date range or diagnosis description (e.g., "the
 
 ### 6. Insurance Q&A
 Patient uploads insurance policy PDF → bot extracts and stores text → patient can ask coverage questions. Bot answers strictly from policy text — responds "not mentioned in your policy" if information isn't found. Supports multiple policies per patient.
+
+### 7. Meal Photo Nutrition Logging
+Patient sends a meal photo → bot identifies items and estimates macros → user confirms/edits/cancels via WhatsApp buttons → confirmed meal is logged to `meal_logs` with photo storage path persisted from Supabase Storage.
+
+Test guide: `docs/bot-test-meal.md`.
 
 ## Deep Linking
 

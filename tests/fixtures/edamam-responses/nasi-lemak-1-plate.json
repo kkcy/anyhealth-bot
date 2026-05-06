@@ -1,0 +1,14 @@
+{
+  "uri": "http://www.edamam.com/ontologies/edamam.owl#recipe_xyz",
+  "calories": 398,
+  "totalWeight": 350,
+  "totalNutrients": {
+    "ENERC_KCAL": { "label": "Energy", "quantity": 398, "unit": "kcal" },
+    "PROCNT":     { "label": "Protein", "quantity": 11, "unit": "g" },
+    "CHOCDF":     { "label": "Carbs",   "quantity": 55, "unit": "g" },
+    "FAT":        { "label": "Fat",     "quantity": 14, "unit": "g" },
+    "FIBTG":      { "label": "Fiber",   "quantity": 3,  "unit": "g" },
+    "SUGAR":      { "label": "Sugar",   "quantity": 2,  "unit": "g" },
+    "NA":         { "label": "Sodium",  "quantity": 450, "unit": "mg" }
+  }
+}

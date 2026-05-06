@@ -1,3 +1,5 @@
+import type { EnrichedItem } from "@/lib/nutrition/types";
+
 export interface PatientRef {
   id: string;
   name: string;
@@ -122,4 +124,25 @@ export interface ThreadState {
    * "share name + IC" prompt and clears this flag.
    */
   awaitingDocVerification?: boolean;
+
+  pendingMealAnalysis?: {
+    imageUrl: string;
+    storagePath: string;
+    items: EnrichedItem[];
+    totals: {
+      kcal: number;
+      protein_g: number;
+      carb_g: number;
+      fat_g: number;
+      fiber_g: number;
+      sugar_g: number;
+      sodium_mg: number;
+    };
+    providerUsed: string;
+    visionModel: string;
+  };
+
+  awaitingMealEditText?: boolean;
+  mealEditRoundCount?: number;
+  awaitingMealPatientPick?: boolean;
 }

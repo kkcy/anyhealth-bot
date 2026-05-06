@@ -10,6 +10,9 @@ const REQUIRED_ENV_VARS = [
   "POSTGRES_URL",
 ] as const;
 
+const VALID_PROVIDERS = ["gemini", "edamam"] as const;
+type Provider = (typeof VALID_PROVIDERS)[number];
+
 export function validateEnv() {
   const missing = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
   if (missing.length > 0) {
@@ -17,4 +20,23 @@ export function validateEnv() {
       `Missing required environment variables:\n${missing.map((k) => `  - ${k}`).join("\n")}`
     );
   }
+
+  const provider = (process.env.NUTRITION_PROVIDER ?? "gemini") as string;
+  if (!VALID_PROVIDERS.includes(provider as Provider)) {
+    throw new Error(
+      `NUTRITION_PROVIDER must be one of ${VALID_PROVIDERS.join("|")}, got "${provider}"`
+    );
+  }
+  if (provider === "edamam") {
+    const edamamMissing = ["EDAMAM_APP_ID", "EDAMAM_APP_KEY"].filter((k) => !process.env[k]);
+    if (edamamMissing.length > 0) {
+      throw new Error(
+        `NUTRITION_PROVIDER=edamam requires:\n${edamamMissing.map((k) => `  - ${k}`).join("\n")}`
+      );
+    }
+  }
+}
+
+export function getNutritionProvider(): Provider {
+  return ((process.env.NUTRITION_PROVIDER ?? "gemini") as Provider);
 }

@@ -6,12 +6,14 @@ import { createTools } from "./tools";
 import { buildSystemPrompt } from "./prompt";
 import { validateEnv } from "@/lib/env";
 import { sendListMessage, sendReplyButtons, sendLocationRequest } from "@/lib/whatsapp";
+import { downloadWhatsAppMedia } from "@/lib/whatsapp";
 import type { ThreadState } from "@/types";
 import { stepCountIs } from "ai";
 import { parseDeepLinkToken, parseFriendlyPrefill, applyDeepLink } from "./deep-link";
 import { resolveClinicBySlug, resolveClinicByName } from "./clinic-resolver";
 import { sendWelcome } from "./messages/welcome";
 import { parseButtonPayload, handleButtonAction } from "./messages/button-router";
+import { uploadMealPhoto } from "@/lib/nutrition/photo-storage";
 
 let _bot: ReturnType<typeof createBot> | null = null;
 
@@ -188,6 +190,37 @@ function extractLocation(message: any): { lat: number; lng: number } | undefined
   const lng = Number(loc.longitude ?? loc.lng ?? loc.lon);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
   return { lat, lng };
+}
+
+function extractImageMediaId(message: any): string | undefined {
+  return (
+    message?.image?.id ??
+    message?.payload?.image?.id ??
+    message?.payload?.messages?.[0]?.image?.id
+  );
+}
+
+type MealAction =
+  | { kind: "meal_confirm" }
+  | { kind: "meal_edit" }
+  | { kind: "meal_cancel" }
+  | { kind: "meal_pick"; patientId: string };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function parseMealActionFromText(text: string): MealAction | null {
+  if (text === "meal_confirm") return { kind: "meal_confirm" };
+  if (text === "meal_edit") return { kind: "meal_edit" };
+  if (text === "meal_cancel") return { kind: "meal_cancel" };
+  if (text.startsWith("meal_pick:")) {
+    const patientId = text.slice("meal_pick:".length).trim();
+    if (UUID_RE.test(patientId)) return { kind: "meal_pick", patientId };
+  }
+  return null;
+}
+
+function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
 function mapInteractiveReplyToText(
@@ -718,6 +751,57 @@ export async function handleMessage(thread: any, message: any) {
   let activeMessage = message;
   let deepLinkApplied = false;
 
+  const incomingMediaId = extractImageMediaId(activeMessage);
+  if (incomingMediaId) {
+    try {
+      const phone = state.phone || extractPhone(thread);
+      const media = await downloadWhatsAppMedia(incomingMediaId);
+      const uploaded = await uploadMealPhoto({
+        phone,
+        bytes: bufferToArrayBuffer(media.buffer),
+        mimeType: media.contentType,
+      });
+
+      const raw = await (tools as any).analyze_food_photo.execute({
+        imageUrl: uploaded.signedUrl,
+        storagePath: uploaded.storagePath,
+        localeHint: "MY",
+      });
+      const data = parseJsonSafe(raw);
+      if (!data?.is_food) {
+        await thread.post(
+          typeof data?.message === "string"
+            ? data.message
+            : "That image does not look like food. Please send a clear meal photo."
+        );
+        return;
+      }
+
+      const totals = data?.totals ?? {};
+      const summary = [
+        "I identified these items from your photo:",
+        ...(Array.isArray(data?.items)
+          ? data.items.slice(0, 8).map((i: any) => `- ${i.name} (${i.portion})`)
+          : []),
+        "",
+        `Estimated total: ${Number(totals.kcal ?? 0).toFixed(0)} kcal | P ${Number(totals.protein_g ?? 0).toFixed(1)}g | C ${Number(totals.carb_g ?? 0).toFixed(1)}g | F ${Number(totals.fat_g ?? 0).toFixed(1)}g`,
+        "Confirm to log this meal?",
+      ].join("\n");
+
+      const sent = await sendReplyButtons(phone, summary, [
+        { id: "meal_confirm", title: "Confirm" },
+        { id: "meal_edit", title: "Edit" },
+        { id: "meal_cancel", title: "Cancel" },
+      ]);
+      if (!sent) await thread.post(summary);
+      return;
+    } catch (err) {
+      console.error("[MEAL] image intake failed:", err);
+      await thread.post("I couldn't process that photo right now. Please try again.");
+      return;
+    }
+  }
+
   // --- Deep-link routing ---
   {
     const tokenText: string = String(activeMessage?.text?.body ?? activeMessage?.text ?? "");
@@ -783,7 +867,77 @@ export async function handleMessage(thread: any, message: any) {
   // --- end deep-link routing ---
 
   const incomingText: string = String(activeMessage?.text?.body ?? activeMessage?.text ?? "");
+  const phone = state.phone || extractPhone(thread);
+  const interactiveReplyId = extractInteractiveReplyId(activeMessage);
+  const interactiveReplyTitle = extractInteractiveReplyTitle(activeMessage);
   const extraSystemNotes: string[] = [];
+
+  async function handleMealAction(action: MealAction): Promise<void> {
+    if (action.kind === "meal_confirm") {
+      if ((state.patients?.length ?? 0) > 1 && !state.activePatientId) {
+        const options = (state.patients ?? []).slice(0, 10).map((p) => ({
+          id: `meal_pick:${p.id}`,
+          title: clip(p.name, 24),
+          description: p.ic ? `IC ending ${p.ic.slice(-4)}` : undefined,
+        }));
+        const sent = await sendListMessage(phone, "Who is this meal for?", "Pick patient", [
+          { title: "Patients", rows: options },
+        ]);
+        await updateState({ awaitingMealPatientPick: true });
+        if (!sent) await thread.post("Who is this meal for? Please tap a patient.");
+        return;
+      }
+      const raw = await (tools as any).log_meal.execute({});
+      const data = parseJsonSafe(raw);
+      await thread.post(
+        data?.success
+          ? "Meal logged successfully."
+          : String(data?.error ?? "I couldn't log this meal. Please try again.")
+      );
+      return;
+    }
+
+    if (action.kind === "meal_pick") {
+      await updateState({ activePatientId: action.patientId, awaitingMealPatientPick: false });
+      const raw = await (tools as any).log_meal.execute({});
+      const data = parseJsonSafe(raw);
+      await thread.post(
+        data?.success
+          ? "Meal logged successfully."
+          : String(data?.error ?? "I couldn't log this meal. Please try again.")
+      );
+      return;
+    }
+
+    if (action.kind === "meal_edit") {
+      const nextCount = (state.mealEditRoundCount ?? 0) + 1;
+      if (nextCount > 3) {
+        await updateState({ awaitingMealEditText: false, mealEditRoundCount: 0 });
+        await thread.post("You've reached the edit limit (3). Please send a new meal photo.");
+        return;
+      }
+      await updateState({ awaitingMealEditText: true, mealEditRoundCount: nextCount });
+      await thread.post("Please tell me what to correct in the meal items or portions.");
+      return;
+    }
+
+    await updateState({
+      pendingMealAnalysis: undefined,
+      awaitingMealEditText: false,
+      mealEditRoundCount: 0,
+      awaitingMealPatientPick: false,
+    });
+    await thread.post("Meal logging cancelled.");
+    return;
+  }
+
+  const mealAction =
+    parseMealActionFromText(incomingText.trim()) ??
+    parseMealActionFromText(interactiveReplyId ?? "");
+  if (mealAction) {
+    await handleMealAction(mealAction);
+    return;
+  }
 
   // --- Button Routing ---
   const buttonAction = parseButtonPayload(incomingText);
@@ -901,6 +1055,44 @@ export async function handleMessage(thread: any, message: any) {
     return;
   }
 
+  if (
+    state.awaitingMealEditText &&
+    !isInteractiveClick &&
+    incomingText.trim().length > 0 &&
+    state.pendingMealAnalysis?.imageUrl
+  ) {
+    const raw = await (tools as any).analyze_food_photo.execute({
+      imageUrl: state.pendingMealAnalysis.imageUrl,
+      storagePath: state.pendingMealAnalysis.storagePath,
+      localeHint: "MY",
+      editHint: incomingText.trim(),
+    });
+    const data = parseJsonSafe(raw);
+    if (!data?.is_food) {
+      await updateState({ awaitingMealEditText: false });
+      await thread.post("I couldn't re-analyze that as a meal. Please send a new food photo.");
+      return;
+    }
+    await updateState({ awaitingMealEditText: false });
+    const totals = data?.totals ?? {};
+    const summary = [
+      "Updated meal estimate:",
+      ...(Array.isArray(data?.items)
+        ? data.items.slice(0, 8).map((i: any) => `- ${i.name} (${i.portion})`)
+        : []),
+      "",
+      `Estimated total: ${Number(totals.kcal ?? 0).toFixed(0)} kcal | P ${Number(totals.protein_g ?? 0).toFixed(1)}g | C ${Number(totals.carb_g ?? 0).toFixed(1)}g | F ${Number(totals.fat_g ?? 0).toFixed(1)}g`,
+      "Confirm to log this meal?",
+    ].join("\n");
+    const sent = await sendReplyButtons(extractPhone(thread), summary, [
+      { id: "meal_confirm", title: "Confirm" },
+      { id: "meal_edit", title: "Edit" },
+      { id: "meal_cancel", title: "Cancel" },
+    ]);
+    if (!sent) await thread.post(summary);
+    return;
+  }
+
   const incomingLocation = extractLocation(activeMessage);
   if (incomingLocation) {
     await updateState({
@@ -914,8 +1106,6 @@ export async function handleMessage(thread: any, message: any) {
       `[BOT] Captured location ${incomingLocation.lat},${incomingLocation.lng}`
     );
   }
-  const interactiveReplyId = extractInteractiveReplyId(activeMessage);
-  const interactiveReplyTitle = extractInteractiveReplyTitle(activeMessage);
   if (interactiveReplyId) {
     console.log(`[DET] interactive id=${interactiveReplyId} title="${clip(String(interactiveReplyTitle ?? ""), 40)}"`);
     if (interactiveReplyId === "booking_confirm_yes") {

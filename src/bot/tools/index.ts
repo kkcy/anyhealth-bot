@@ -3,6 +3,7 @@ import { createBookingTools } from "./booking";
 import { createDocumentTools } from "./documents";
 import { createInsuranceTools } from "./insurance";
 import { manageOptoutsTools } from "./manage-optouts";
+import { createMealTools } from "./meal";
 import type { ThreadState } from "@/types";
 
 export function createTools(
@@ -14,6 +15,7 @@ export function createTools(
     ...createBookingTools(state, updateState),
     ...createDocumentTools(state, updateState),
     ...createInsuranceTools(state, updateState),
+    ...createMealTools(state, updateState),
     ...manageOptoutsTools({ state }),
   };
 }
