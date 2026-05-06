@@ -343,24 +343,7 @@ function buildInteractivePlanFromToolResults(
     const data = parseJsonSafe(raw.result ?? raw.output ?? raw.toolResult ?? raw.value);
     if (!data || typeof data !== "object") continue;
 
-    if (
-      toolName === "user_lookup" &&
-      data.found === true &&
-      data.patientCount > 1 &&
-      Array.isArray(data.patients) &&
-      !state.activePatientId
-    ) {
-      const options = data.patients
-        .slice(0, 10)
-        .map((p: any) => ({
-          id: `patient_select_${Number(p.index)}`,
-          title: clip(String(p.name ?? `Patient ${p.index}`), 24),
-          description: p.ic ? `IC ending ${String(p.ic)}` : undefined,
-        }));
-      if (options.length > 0) {
-        return { body: PLAN_BODY.patient, options };
-      }
-    }
+    // Patient picker is handled separately for document retrieval — not auto-rendered after user_lookup.
 
     if (
       toolName === "search_services" &&
@@ -467,15 +450,8 @@ function buildInteractivePlanFromToolResults(
 }
 
 function buildInteractivePlanFromState(state: ThreadState): InteractivePlan | undefined {
-  if (!state.activePatientId && (state.patients?.length ?? 0) > 1) {
-    return {
-      body: PLAN_BODY.patient,
-      options: (state.patients ?? []).slice(0, 10).map((p, i) => ({
-        id: `patient_select_${i + 1}`,
-        title: clip(String(p.name ?? `Patient ${i + 1}`), 24),
-      })),
-    };
-  }
+  // Patient picker intentionally omitted — only document retrieval asks for it,
+  // and that flow is driven by the LLM (select_patient tool), not state-based fallback.
 
   if (!state.activeClinicId && (state.clinicOptions?.length ?? 0) > 1) {
     return {
@@ -890,10 +866,8 @@ export async function handleMessage(thread: any, message: any) {
     const meth = svc?.methods.find((mm) => mm.methodId === state.activeMethodId);
     const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
     const doctor = (state.doctorOptions ?? []).find((d) => d.doctorId === state.activeDoctorId);
-    const patient = (state.patients ?? []).find((p) => p.id === state.activePatientId);
     const summary = [
       "Here are your booking details — does this look right?",
-      patient ? `Patient: ${patient.name}` : null,
       clinicOpt ? `Clinic: ${clinicOpt.clinicName}` : null,
       svc ? `Service: ${svc.serviceName}${meth?.methodName ? ` (${meth.methodName})` : ""}` : null,
       doctor ? `Doctor: ${doctor.name}` : null,
@@ -1366,10 +1340,8 @@ export async function handleMessage(thread: any, message: any) {
 
     const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
     const doctor = (state.doctorOptions ?? []).find((d) => d.doctorId === state.activeDoctorId);
-    const patient = (state.patients ?? []).find((p) => p.id === state.activePatientId);
     const summary = [
       "Here are your booking details — does this look right?",
-      patient ? `Patient: ${patient.name}` : null,
       clinicOpt ? `Clinic: ${clinicOpt.clinicName}` : null,
       svc ? `Service: ${svc.serviceName}${meth?.methodName ? ` (${meth.methodName})` : ""}` : null,
       doctor ? `Doctor: ${doctor.name}` : null,

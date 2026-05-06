@@ -363,7 +363,7 @@ export function createLookupTools(
           return "Could not determine sender identity. WhatsApp is required.";
         }
 
-        const { data: user, error: userError } = await supabase
+        const { data: existingUser, error: userError } = await supabase
           .from("wa_user")
           .select("id, username, phone_number, language")
           .or(`phone_number.eq.${state.phone},phone_number.eq.+${state.phone}`)
@@ -374,11 +374,29 @@ export function createLookupTools(
           return JSON.stringify({ error: "Failed to look up user", detail: userError.message });
         }
 
+        let user = existingUser;
+        let createdNow = false;
         if (!user) {
-          return JSON.stringify({
-            found: false,
-            message: "No account found for this phone number. Please register at a clinic first.",
-          });
+          const canonicalPhone = state.phone.startsWith("+") ? state.phone : `+${state.phone}`;
+          // Upsert on phone_number to dodge a webhook-retry race that could
+          // otherwise insert two wa_user rows for the same phone.
+          const { data: created, error: createError } = await supabase
+            .from("wa_user")
+            .upsert(
+              { phone_number: canonicalPhone, username: canonicalPhone },
+              { onConflict: "phone_number" }
+            )
+            .select("id, username, phone_number, language")
+            .single();
+          if (createError || !created) {
+            return JSON.stringify({
+              error: "Failed to create user",
+              detail: createError?.message ?? "unknown",
+            });
+          }
+          user = created;
+          createdNow = true;
+          console.log(`[USER_LOOKUP] Auto-created wa_user id=${user.id} phone=${canonicalPhone}`);
         }
 
         const { data: patients, error: patientError } = await supabase
@@ -405,15 +423,11 @@ export function createLookupTools(
 
         return JSON.stringify({
           found: true,
+          createdNow,
           userName: user.username,
           language: user.language,
           patients: patientRefs.map((p, i) => ({ index: i + 1, name: p.name, ic: p.ic.slice(-4) })),
           patientCount: patientRefs.length,
-          needsPatientRegistration: patientRefs.length === 0,
-          message:
-            patientRefs.length === 0
-              ? "Account found, but no patient profile is linked yet. Please register patient details at a clinic first."
-              : undefined,
         });
       },
     }),

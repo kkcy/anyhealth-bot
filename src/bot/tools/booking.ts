@@ -75,7 +75,6 @@ export function createBookingTools(
       }),
       execute: async ({ date, time, address, reminderRemark, details, isNewPatient, confirmed, bookingType }) => {
         // All IDs come from state — no UUIDs from the LLM
-        let patientId = state.activePatientId;
         let serviceId = state.activeServiceId;
         let clinicId = state.activeClinicId;
         let methodId = state.activeMethodId;
@@ -83,9 +82,6 @@ export function createBookingTools(
 
         if (!state.userId) {
           return JSON.stringify({ error: "Please start a conversation first. Call user_lookup." });
-        }
-        if (!patientId) {
-          return JSON.stringify({ error: "No patient selected. Call user_lookup or select_patient first." });
         }
         if (!confirmed) {
           // Stage the args so the deterministic Yes/No button can finalize.
@@ -126,7 +122,7 @@ export function createBookingTools(
         }
 
         console.log("[BOOKING] State at create_booking:", JSON.stringify({
-          userId: state.userId, patientId, serviceId, clinicId, methodId, doctorId,
+          userId: state.userId, serviceId, clinicId, methodId, doctorId,
         }));
 
         if (!serviceId || !clinicId) {
@@ -182,10 +178,9 @@ export function createBookingTools(
           console.log("[BOOKING] Auto-assigned doctor:", doctorId);
         }
 
-        const patient = state.patients?.find((p) => p.id === patientId);
-        if (!patient) {
-          return JSON.stringify({ error: "Patient not found in state." });
-        }
+        const patient = state.activePatientId
+          ? state.patients?.find((p) => p.id === state.activePatientId)
+          : undefined;
 
         let serviceInfoQuery = supabase
           .from("c_a_service_info")
@@ -336,7 +331,7 @@ export function createBookingTools(
           status: booking.status,
           isNewPatient: finalIsNewPatient,
           reminderRemark: booking.remark,
-          patientName: patient.name,
+          patientName: patient?.name ?? null,
           serviceName: serviceInfo.service?.service_name ?? null,
           doctorName: doctor?.name ?? null,
           clinicName: clinic?.name ?? null,

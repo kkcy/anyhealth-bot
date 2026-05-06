@@ -78,22 +78,24 @@ async function runGuardTests() {
       assert: (r) => assert.match(String(r.error ?? ""), /Call user_lookup/i),
     },
     {
-      name: "booking blocked before patient selected",
+      name: "booking proceeds without patient (uses wa_user only)",
       run: async () => {
+        // Booking no longer requires activePatientId. With userId set but no
+        // service/clinic, the next guard ("No service selected") should fire.
         const state = makeState({ userId: "u-1" });
         const tools: any = createTools(state, async (p) => Object.assign(state, p));
         return parseResult(await tools.create_booking.execute({ date: "2026-04-20", confirmed: true }));
       },
-      assert: (r) => assert.match(String(r.error ?? ""), /No patient selected/i),
+      assert: (r) => assert.match(String(r.error ?? ""), /No service selected/i),
     },
     {
-      name: "booking blocked without confirmation",
+      name: "booking unconfirmed stages instead of inserting",
       run: async () => {
         const state = makeState({ userId: "u-1", activePatientId: "p-1" });
         const tools: any = createTools(state, async (p) => Object.assign(state, p));
         return parseResult(await tools.create_booking.execute({ date: "2026-04-20", confirmed: false }));
       },
-      assert: (r) => assert.match(String(r.error ?? ""), /confirm all booking details/i),
+      assert: (r) => assert.equal(r.needsConfirmation, true),
     },
     {
       name: "availability blocked without clinic selection",
