@@ -343,7 +343,22 @@ function buildInteractivePlanFromToolResults(
     const data = parseJsonSafe(raw.result ?? raw.output ?? raw.toolResult ?? raw.value);
     if (!data || typeof data !== "object") continue;
 
-    // Patient picker is handled separately for document retrieval — not auto-rendered after user_lookup.
+    if (
+      toolName === "start_document_access" &&
+      data.needsPatientPick === true &&
+      Array.isArray(data.patients)
+    ) {
+      const options = data.patients
+        .slice(0, 10)
+        .map((p: any) => ({
+          id: `patient_select_${Number(p.index)}`,
+          title: clip(String(p.name ?? `Patient ${p.index}`), 24),
+          description: p.ic ? `IC ending ${String(p.ic)}` : undefined,
+        }));
+      if (options.length > 0) {
+        return { body: PLAN_BODY.patient, options };
+      }
+    }
 
     if (
       toolName === "search_services" &&
@@ -962,14 +977,23 @@ export async function handleMessage(thread: any, message: any) {
     if (interactiveReplyId.startsWith("patient_select_")) {
       const index = parseIndexedReply(interactiveReplyId, "patient_select_");
       if (index) {
+        const wasAwaitingDocVerify = state.awaitingDocVerification === true;
         const raw = await (tools as any).select_patient.execute({ index });
         const data = parseJsonSafe(raw);
-        console.log(`[DET] patient_select idx=${index} success=${!!data?.success} name="${data?.patientName ?? "-"}"`);
-        await thread.post(
-          data?.success
-            ? `Noted. ${data.message ?? "Patient selected."}`
-            : String(data?.error ?? "Invalid patient selection.")
-        );
+        console.log(`[DET] patient_select idx=${index} success=${!!data?.success} name="${data?.patientName ?? "-"}" docFlow=${wasAwaitingDocVerify}`);
+        if (data?.success && wasAwaitingDocVerify) {
+          await updateState({ awaitingDocVerification: undefined });
+          await thread.post(
+            `Noted — acting on behalf of ${data.patientName ?? "the selected patient"}.\n\n` +
+            `For security, please share the patient's full name and IC number to verify identity.`
+          );
+        } else {
+          await thread.post(
+            data?.success
+              ? `Noted. ${data.message ?? "Patient selected."}`
+              : String(data?.error ?? "Invalid patient selection.")
+          );
+        }
         return;
       }
     }

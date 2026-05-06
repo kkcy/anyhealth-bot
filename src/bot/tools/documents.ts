@@ -144,6 +144,46 @@ export function createDocumentTools(
   }
 
   return {
+    start_document_access: tool({
+      description:
+        "ALWAYS call this FIRST when the user asks for any document (consultation report, MC, invoice, referral) or insurance Q&A. " +
+        "It decides whether to show a patient picker (multiple linked patients) or proceed straight to identity verification (one or zero patients). " +
+        "Takes no parameters.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!state.userId) {
+          return JSON.stringify({ error: "Please call user_lookup first." });
+        }
+        const patients = state.patients ?? [];
+        if (patients.length === 0) {
+          return JSON.stringify({
+            ready: false,
+            noPatients: true,
+            instruction:
+              "No patient profile is linked to this WhatsApp account yet. Tell the user we don't have any records under their number and ask them to register at the clinic.",
+          });
+        }
+        if (patients.length > 1 && !state.activePatientId) {
+          await updateState({ awaitingDocVerification: true });
+          return JSON.stringify({
+            needsPatientPick: true,
+            patients: patients.map((p, i) => ({
+              index: i + 1,
+              name: p.name,
+              ic: p.ic ? p.ic.slice(-4) : "",
+            })),
+            instruction:
+              "The system will render an interactive patient picker. Do NOT list patients in plain text and do NOT ask for the IC yet — wait for the user's tap.",
+          });
+        }
+        return JSON.stringify({
+          ready: true,
+          instruction:
+            "Ask the user for the patient's full name and IC number, then call verify_patient.",
+        });
+      },
+    }),
+
     verify_patient: tool({
       description:
         "Verify a patient's identity using their full name and IC number. " +

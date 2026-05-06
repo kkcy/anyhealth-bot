@@ -115,4 +115,11 @@ export interface ThreadState {
    * parsed as a date and routed through the time picker.
    */
   awaitingDate?: boolean;
+
+  /**
+   * Set by start_document_access when a patient picker is shown. After the
+   * user taps a patient, the deterministic patient_select_ handler posts the
+   * "share name + IC" prompt and clears this flag.
+   */
+  awaitingDocVerification?: boolean;
 }
