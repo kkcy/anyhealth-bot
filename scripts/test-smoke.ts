@@ -290,16 +290,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           id: "booking-intent",
           message: "Hi, I want to book a consultation tomorrow at 3pm. I have a fever.",
           requireAllTools: ["user_lookup"],
-          forbidTools: ["create_booking"],
-        },
-        {
-          id: "booking-select-patient",
-          shouldRun: shouldSelectPatient,
-          message: (ctx) => {
-            const { index, patient } = resolvePreferredPatient(ctx);
-            return `I choose patient ${index}, ${patient.name}.`;
-          },
-          forbidTools: ["create_booking"],
+          forbidTools: ["create_booking", "select_patient"],
         },
         {
           id: "booking-search-services",
@@ -387,14 +378,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           id: "view-intent",
           message: "Can you show my upcoming bookings?",
           requireAllTools: ["user_lookup"],
-        },
-        {
-          id: "view-select-patient",
-          shouldRun: shouldSelectPatient,
-          message: (ctx) => {
-            const { index, patient } = resolvePreferredPatient(ctx);
-            return `I choose patient ${index}, ${patient.name}. Show my bookings.`;
-          },
+          forbidTools: ["select_patient"],
         },
         {
           id: "view-bookings",
@@ -415,14 +399,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           id: "reschedule-intent",
           message: "I need to reschedule my appointment.",
           requireAllTools: ["user_lookup"],
-        },
-        {
-          id: "reschedule-select-patient",
-          shouldRun: shouldSelectPatient,
-          message: (ctx) => {
-            const { index, patient } = resolvePreferredPatient(ctx);
-            return `I choose patient ${index}, ${patient.name}.`;
-          },
+          forbidTools: ["select_patient"],
         },
         {
           id: "reschedule-view",
@@ -443,7 +420,8 @@ function buildCases(options: CliOptions): SmokeCase[] {
         {
           id: "documents-intent",
           message: buildDocumentIntentMessage(options),
-          requireAllTools: ["user_lookup"],
+          requireAllTools: ["user_lookup", "start_document_access"],
+          forbidTools: ["verify_patient", "search_documents"],
         },
         {
           id: "documents-select-patient",
@@ -452,6 +430,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
             const { index, patient } = resolvePreferredPatient(ctx);
             return `I choose patient ${index}, ${patient.name}.`;
           },
+          requireAnyTools: ["select_patient"],
         },
         {
           id: "documents-verify",
@@ -475,7 +454,8 @@ function buildCases(options: CliOptions): SmokeCase[] {
         {
           id: "insurance-intent",
           message: "What does my insurance cover for specialist consultation?",
-          requireAllTools: ["user_lookup"],
+          requireAllTools: ["user_lookup", "start_document_access"],
+          forbidTools: ["verify_patient", "ask_insurance"],
         },
         {
           id: "insurance-select-patient",
@@ -484,6 +464,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
             const { index, patient } = resolvePreferredPatient(ctx);
             return `I choose patient ${index}, ${patient.name}.`;
           },
+          requireAnyTools: ["select_patient"],
         },
         {
           id: "insurance-verify",
@@ -507,19 +488,17 @@ function buildCases(options: CliOptions): SmokeCase[] {
       turns: [
         {
           id: "no-patient-intent",
-          message: "Hi, I want to make an appointment tomorrow at 3pm.",
+          message: "Hi, I want to book a consultation tomorrow at 3pm. I have a fever.",
           requireAllTools: ["user_lookup"],
-          forbidTools: ["create_booking"],
-          requireReplyContains: ["patient"],
-          forbidReplyContains: ["no account found"],
+          forbidTools: ["select_patient"],
+          forbidReplyContains: ["register at a clinic", "register first", "no account found"],
         },
         {
           id: "no-patient-followup",
-          message: "Please help me proceed with booking.",
-          requireAllTools: ["user_lookup"],
-          forbidTools: ["create_booking"],
-          requireReplyContains: ["patient"],
-          forbidReplyContains: ["no account found"],
+          message: "Please help me find a clinic for fever.",
+          requireAnyTools: ["search_services", "search_services_near_me"],
+          forbidTools: ["select_patient"],
+          forbidReplyContains: ["register at a clinic", "register first"],
         },
       ],
     });
