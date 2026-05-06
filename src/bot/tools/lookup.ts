@@ -891,7 +891,7 @@ export function createLookupTools(
         });
 
         const query = state.lastSearchQuery ?? "";
-        const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 1);
+        const words = extractSearchTerms(query);
 
         return await fetchClinicServices(clinic, query, words);
       },

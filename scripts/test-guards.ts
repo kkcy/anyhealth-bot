@@ -69,13 +69,17 @@ async function runGuardTests() {
       assert: (r) => assert.match(String(r.error ?? ""), /Identity verification required/i),
     },
     {
-      name: "booking blocked before user lookup",
+      name: "booking auto-bootstraps user when no userId, then blocks on service",
       run: async () => {
+        // create_booking now auto-creates the wa_user from state.phone if the
+        // LLM jumped straight to booking without user_lookup. The next guard
+        // ("No service selected") should fire instead of the old user_lookup
+        // gate.
         const state = makeState();
         const tools: any = createTools(state, async (p) => Object.assign(state, p));
         return parseResult(await tools.create_booking.execute({ date: "2026-04-20", confirmed: true }));
       },
-      assert: (r) => assert.match(String(r.error ?? ""), /Call user_lookup/i),
+      assert: (r) => assert.match(String(r.error ?? ""), /No service selected/i),
     },
     {
       name: "booking proceeds without patient (uses wa_user only)",

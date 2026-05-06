@@ -82,7 +82,7 @@ If the user's message contains any combination of a service hint, a date, or a t
 
 The tool returns one of:
 - \`{nextAction, nextArgs, extracted}\` — immediately call the tool named in \`nextAction\` with \`nextArgs\` and continue. Do NOT call \`extract_booking_intent\` again in the same turn.
-- \`{skipped: true, reason}\` — ignore extraction and follow the deterministic flow as today.
+- \`{skipped: true, reason, instruction?}\` — if \`instruction\` is set, follow it verbatim and do NOT call any other booking tool this turn. Otherwise ignore extraction and follow the deterministic flow as today.
 - \`{error: "date_in_past"}\` — tell the user the date is in the past and ask for a different one.
 
 If the user replies to a confirmation summary with a correction (e.g. "make it 10am", "Wednesday instead", "actually new patient"), call \`extract_booking_intent\` again with ONLY the changed slot. The tool will merge into state; then re-run the affected step (e.g. \`get_clinic_availability\` for a date or time change) and re-post the confirmation.

@@ -48,6 +48,27 @@ function isPastDate(iso: string): boolean {
   return iso < todayIso;
 }
 
+function normalizeKeyword(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function isDifferentServiceKeyword(state: ThreadState, args: IntentArgs): boolean {
+  if (args.serviceKeyword === undefined) return false;
+  const existing = normalizeKeyword(
+    state.extractedIntent?.serviceKeyword ?? state.lastSearchQuery
+  );
+  const incoming = normalizeKeyword(args.serviceKeyword);
+  if (!existing || !incoming) return false;
+  // Same service if either string contains the other (handles "gp" vs
+  // "general consultation"); different service implies re-entry.
+  return !(existing === incoming || existing.includes(incoming) || incoming.includes(existing));
+}
+
+function isReentryAttempt(state: ThreadState, args: IntentArgs): boolean {
+  if (!state.activeClinicId) return false;
+  return isDifferentServiceKeyword(state, args);
+}
+
 function evaluateIntentGuard(state: ThreadState, args: IntentArgs): string | null {
   const hasConfirmCardDiff =
     !!state.pendingBooking &&
@@ -61,6 +82,11 @@ function evaluateIntentGuard(state: ThreadState, args: IntentArgs): string | nul
   if (state.activeBookingId) return "activeBookingId";
   if (state.pendingDocRetrievalBookingId) return "pendingDocRetrievalBookingId";
   if (state.activeServiceId) return "activeServiceId";
+  // Mid-flow with a clinic selected: only block when the user is starting a
+  // *different* booking (different service keyword). Slot-only updates and
+  // same-service refinements fall through so the in-flight booking can
+  // continue.
+  if (isReentryAttempt(state, args)) return "activeClinicId";
   if (state.awaitingAddress) return "awaitingAddress";
   if (state.awaitingTime) return "awaitingTime";
   if (state.awaitingDate) return "awaitingDate";
@@ -69,6 +95,17 @@ function evaluateIntentGuard(state: ThreadState, args: IntentArgs): string | nul
 
   return null;
 }
+
+const IN_PROGRESS_BOOKING_REASONS: ReadonlySet<string> = new Set([
+  "pendingBooking",
+  "activeBookingId",
+  "activeServiceId",
+  "activeClinicId",
+  "awaitingAddress",
+  "awaitingTime",
+  "awaitingDate",
+  "awaitingRemark",
+]);
 
 type ServiceInfoForBooking = {
   id: string;
@@ -124,7 +161,29 @@ export function createBookingTools(
         let doctorId = state.activeDoctorId;
 
         if (!state.userId) {
-          return JSON.stringify({ error: "Please start a conversation first. Call user_lookup." });
+          // Auto-bootstrap the wa_user when the LLM jumped straight to booking
+          // without calling user_lookup. user_lookup itself upserts on phone,
+          // so we replicate the minimal write here to keep the booking flow
+          // resilient.
+          if (!state.phone) {
+            return JSON.stringify({ error: "Could not determine sender identity. WhatsApp is required." });
+          }
+          const canonicalPhone = state.phone.startsWith("+") ? state.phone : `+${state.phone}`;
+          const { data: user, error: userError } = await supabase
+            .from("wa_user")
+            .upsert(
+              { phone_number: canonicalPhone, username: canonicalPhone },
+              { onConflict: "phone_number" }
+            )
+            .select("id")
+            .single();
+          if (userError || !user) {
+            return JSON.stringify({
+              error: "Failed to initialize user for booking",
+              detail: userError?.message ?? "unknown",
+            });
+          }
+          await updateState({ userId: user.id });
         }
         if (!confirmed) {
           // Stage the args so the deterministic Yes/No button can finalize.
@@ -420,6 +479,22 @@ export function createBookingTools(
       execute: async ({ serviceKeyword, date, time, method, isNewPatient }) => {
         const skipReason = evaluateIntentGuard(state, { serviceKeyword, date, time, method, isNewPatient });
         if (skipReason) {
+          // Only emit the "you have a booking in progress" directive when the
+          // user is actively trying to start a *different* booking. Slot-only
+          // stray calls (LLM re-invoking extract on "1"/"yes") and same-
+          // service refinements should fall through without derailing the
+          // deterministic flow.
+          if (
+            IN_PROGRESS_BOOKING_REASONS.has(skipReason) &&
+            isDifferentServiceKeyword(state, { serviceKeyword, date, time, method, isNewPatient })
+          ) {
+            return JSON.stringify({
+              skipped: true,
+              reason: skipReason,
+              instruction:
+                "A booking is already in progress for this user. Tell the user about their current booking-in-progress (clinic, service, date, time if known) and ask whether they want to continue with that booking or cancel it before starting a new one. Do NOT call search_services, select_clinic, select_service, or any other booking tool yet — wait for the user's reply.",
+            });
+          }
           return JSON.stringify({ skipped: true, reason: skipReason });
         }
 
@@ -438,8 +513,34 @@ export function createBookingTools(
 
         await updateState({ extractedIntent: merged });
 
-        const nextAction = merged.serviceKeyword ? "search_services" : null;
-        const nextArgs = merged.serviceKeyword ? { query: merged.serviceKeyword } : null;
+        // Mid-flow slot refinement (clinic already selected, no service
+        // change): the user is correcting time/date on the in-flight booking.
+        // Don't re-run search — go straight to availability for the staged or
+        // newly-provided date. Treat both "no serviceKeyword provided" and
+        // "serviceKeyword equal/overlapping with existing" as refinements.
+        const isSlotOnlyRefinement =
+          !!state.activeClinicId &&
+          !isReentryAttempt(state, { serviceKeyword, date, time, method, isNewPatient }) &&
+          (time !== undefined || date !== undefined);
+
+        let nextAction: string | null;
+        let nextArgs: Record<string, unknown> | null;
+        if (isSlotOnlyRefinement) {
+          const dateForAvailability = merged.date ?? state.pendingBookingDate;
+          if (dateForAvailability) {
+            nextAction = "get_clinic_availability";
+            nextArgs = { date: dateForAvailability };
+          } else {
+            nextAction = null;
+            nextArgs = null;
+          }
+        } else if (merged.serviceKeyword) {
+          nextAction = "search_services";
+          nextArgs = { query: merged.serviceKeyword };
+        } else {
+          nextAction = null;
+          nextArgs = null;
+        }
 
         return JSON.stringify({
           extracted: merged,
