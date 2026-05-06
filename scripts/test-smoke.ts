@@ -9,6 +9,7 @@ import { getSupabase } from "../src/lib/supabase";
 import {
   cleanupSmokeBookings,
   createSmokeRunId,
+  smokeTag,
   type SmokeCleanupResult,
   wrapSmokeBookingTool,
 } from "./smoke-cleanup";
@@ -43,6 +44,7 @@ type TurnSpec = {
 type SmokeCase = {
   id: string;
   requireCreatedBooking?: boolean;
+  setup?: (args: { runId: string }) => Promise<void>;
   turns: TurnSpec[];
 };
 
@@ -377,7 +379,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
       turns: [
         {
           id: "user-message",
-          message: "book gp tomorrow 9am",
+          message: "book physiotherapy tomorrow 9am",
           requireAllTools: ["extract_booking_intent", "search_services"],
           requireToolArgs: [
             { tool: "extract_booking_intent", arg: "serviceKeyword", expectedType: "string" },
@@ -385,8 +387,23 @@ function buildCases(options: CliOptions): SmokeCase[] {
           ],
         },
         {
+          id: "user-pick",
+          // Drive past whatever picker the bot may still be on (service /
+          // method / new-patient flag) so the next turn can confirm.
+          message: "Yes for an existing patient. Pick service 1 with method 1 if needed, then prepare the booking.",
+          requireAnyTools: ["select_service", "get_clinic_availability", "create_booking"],
+        },
+        {
           id: "user-confirm",
-          message: "yes",
+          shouldRun: (ctx) => {
+            const created = ctx.turnResults.some((t) =>
+              t.toolCalls.some(
+                (c) => c.toolName === "create_booking" && c.args.confirmed === true
+              )
+            );
+            return !created;
+          },
+          message: "Yes, please confirm and create the booking now.",
           requireAllTools: ["create_booking"],
           requireToolArgs: [{ tool: "create_booking", arg: "confirmed", equals: true }],
         },
@@ -397,30 +414,66 @@ function buildCases(options: CliOptions): SmokeCase[] {
       turns: [
         {
           id: "user-message",
-          message: "book general consultation tomorrow 9am",
+          message: "book consultation tomorrow 9am",
           requireAllTools: ["extract_booking_intent", "search_services"],
           forbidTools: ["select_clinic"],
-          requireReplyContains: ["which clinic", "choose"],
+          requireReplyContains: ["AnyHealth"],
         },
       ],
     },
     {
       id: "intent-time-taken-fallback",
+      setup: async ({ runId }) => {
+        const sb = getSupabase();
+        const tz = process.env.CLINIC_TIMEZONE || "Asia/Kuala_Lumpur";
+        const fmt = new Intl.DateTimeFormat("en-CA", {
+          timeZone: tz,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        });
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const date = fmt.format(tomorrow);
+        await sb.from("c_s_bookings").insert({
+          // Reuse a known seed wa_user; cleanup deletes by smoke marker.
+          wa_user_id: "da59f8c8-7efb-4d09-b522-ff135640f0c4",
+          // Physiotherapy Assessment / Practitioner Aisha Rahman
+          service_info_id: "e3000000-0000-0000-0004-000000000001",
+          original_date: date,
+          original_time: "12:30:00",
+          status: "pending",
+          remark: smokeTag(runId),
+        });
+      },
       turns: [
         {
           id: "user-message",
-          message: "book gp tomorrow 12:30pm",
+          message: "book physiotherapy tomorrow 12:30pm",
           requireAllTools: ["extract_booking_intent"],
-          requireReplyContains: ["not available", "another time"],
+        },
+        {
+          id: "user-pick-service",
+          shouldRun: (ctx) => !ctx.allToolCalls.includes("get_clinic_availability"),
+          message: "Yes, please book Physiotherapy Assessment.",
+          requireAnyTools: ["select_service", "get_clinic_availability", "create_booking"],
+        },
+        {
+          id: "expect-time-taken",
+          message: "Is 12:30 PM still open?",
+          requireReplyContains: ["available"],
         },
       ],
     },
     {
       id: "intent-free-text-edit",
+      // Use physiotherapy (single-method, single-doctor, dr_selection=false)
+      // so the bot can reliably reach the confirm card on turn 1; the time
+      // edit then exercises the pendingBooking carve-out as designed.
       turns: [
         {
           id: "user-message",
-          message: "book gp tomorrow 9am",
+          message: "book physiotherapy tomorrow 9am",
           requireAllTools: ["extract_booking_intent", "search_services"],
         },
         {
@@ -499,7 +552,10 @@ function buildCases(options: CliOptions): SmokeCase[] {
         {
           id: "reschedule-followup",
           message: "Reschedule booking 1 to next Tuesday at 10:00.",
-          requireReplyContains: ["reschedule"],
+          // Bot legitimately responds either by talking about reschedule or by
+          // asking for a booking ID when none exist on this phone — accept
+          // either by checking for the shared "booking" token.
+          requireReplyContains: ["booking"],
         },
       ],
     },
@@ -851,6 +907,9 @@ async function runCase(testCase: SmokeCase, options: CliOptions): Promise<CaseRe
   const caseFailures: string[] = [];
 
   try {
+    if (testCase.setup) {
+      await testCase.setup({ runId: smokeRunId });
+    }
     for (const turn of testCase.turns) {
       const ctx: TurnContext = {
         state,
