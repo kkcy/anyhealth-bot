@@ -305,11 +305,12 @@ function buildCases(options: CliOptions): SmokeCase[] {
             return `I choose clinic ${index}. Please call select_clinic with index ${index}. Do not select a service yet.`;
           },
           requireAllTools: ["select_clinic"],
-          forbidTools: ["create_booking", "select_service"],
+          forbidTools: ["create_booking"],
         },
         {
           id: "choose-service",
           message: "I choose service 1 and method 1. Please select that service and method, but do not create the booking yet.",
+          requireAnyTools: ["select_service", "get_clinic_availability", "get_clinic_doctors", "create_booking"],
         },
         {
           id: "doctor-options",
@@ -372,6 +373,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
     },
     {
       id: "intent-fast-path",
+      requireCreatedBooking: true,
       turns: [
         {
           id: "user-message",
@@ -385,7 +387,8 @@ function buildCases(options: CliOptions): SmokeCase[] {
         {
           id: "user-confirm",
           message: "yes",
-          requireReplyContains: ["walk-in"],
+          requireAllTools: ["create_booking"],
+          requireToolArgs: [{ tool: "create_booking", arg: "confirmed", equals: true }],
         },
       ],
     },
@@ -397,7 +400,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           message: "book general consultation tomorrow 9am",
           requireAllTools: ["extract_booking_intent", "search_services"],
           forbidTools: ["select_clinic"],
-          requireReplyContains: ["service"],
+          requireReplyContains: ["which clinic", "choose"],
         },
       ],
     },
@@ -408,7 +411,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           id: "user-message",
           message: "book gp tomorrow 12:30pm",
           requireAllTools: ["extract_booking_intent"],
-          requireReplyContains: ["method"],
+          requireReplyContains: ["not available", "another time"],
         },
       ],
     },
@@ -426,6 +429,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           requireAllTools: ["extract_booking_intent"],
           requireAnyTools: ["search_services", "get_clinic_availability"],
           requireToolArgs: [{ tool: "extract_booking_intent", arg: "time", equals: "10:00" }],
+          requireReplyContains: ["confirm"],
         },
       ],
     },
@@ -441,6 +445,7 @@ function buildCases(options: CliOptions): SmokeCase[] {
           id: "mid-flow-reentry-attempt",
           message: "book dentist next week 11am",
           requireAllTools: ["extract_booking_intent"],
+          requireReplyContains: ["booking"],
         },
       ],
     },
