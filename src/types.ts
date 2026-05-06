@@ -125,6 +125,27 @@ export interface ThreadState {
    */
   awaitingDocVerification?: boolean;
 
+  /**
+   * Pre-resolution slots extracted from free-form user input by
+   * extract_booking_intent. Consumed by the deterministic chain to skip
+   * prompts when the slot is supplied. Cleared on booking commit, explicit
+   * cancel, or session gap.
+   */
+  extractedIntent?: {
+    serviceKeyword?: string;
+    date?: string; // ISO YYYY-MM-DD
+    time?: string; // 24h HH:mm
+    method?: "in_clinic" | "house_call" | "video";
+    isNewPatient?: boolean;
+  };
+
+  /**
+   * Set when the user picks "Add a note" in the edit picker. The next
+   * plain-text turn is captured into pendingBooking.reminderRemark and
+   * the confirm card is re-posted.
+   */
+  awaitingRemark?: boolean;
+
   pendingMealAnalysis?: {
     imageUrl: string;
     storagePath: string;
