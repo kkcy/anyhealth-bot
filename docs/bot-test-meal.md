@@ -9,7 +9,8 @@ Validate WhatsApp meal-photo logging flow end-to-end:
 - `meal_logs` insert with stable storage path
 
 ## Preconditions
-- `NUTRITION_PROVIDER` set (`gemini` or `edamam`)
+- Vertex AI configured: `AI_MODEL=vertex/gemini-2.5-flash`, `GOOGLE_VERTEX_PROJECT`, `GOOGLE_VERTEX_LOCATION`, ADC via `gcloud auth application-default login` or `GOOGLE_APPLICATION_CREDENTIALS`
+- `NUTRITION_PROVIDER` set (`gemini` or `edamam`). `gemini` means vision model returns macros; no separate Gemini API key needed since vision uses Vertex.
 - If `edamam`, set `EDAMAM_APP_ID` and `EDAMAM_APP_KEY`
 - Supabase migrations applied:
   - `005_meal_logs.sql`
