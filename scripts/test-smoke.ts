@@ -372,6 +372,83 @@ function buildCases(options: CliOptions): SmokeCase[] {
       ],
     },
     {
+      id: "intent-fast-path",
+      turns: [
+        {
+          id: "user-message",
+          message: "book gp tomorrow 9am",
+          requireAllTools: ["extract_booking_intent", "search_services"],
+          requireToolArgs: [
+            { tool: "extract_booking_intent", arg: "serviceKeyword", expectedType: "string" },
+            { tool: "extract_booking_intent", arg: "time", equals: "09:00" },
+          ],
+        },
+        {
+          id: "follow-up",
+          message: "method 1",
+          requireAnyTools: ["select_service", "get_clinic_availability", "create_booking"],
+        },
+      ],
+    },
+    {
+      id: "intent-multi-clinic-fallback",
+      turns: [
+        {
+          id: "user-message",
+          message: "book general consultation tomorrow 9am",
+          requireAllTools: ["extract_booking_intent", "search_services"],
+          forbidTools: ["select_clinic"],
+        },
+      ],
+    },
+    {
+      id: "intent-time-taken-fallback",
+      turns: [
+        {
+          id: "user-message",
+          message: "book gp tomorrow 12:30pm",
+          requireAllTools: ["extract_booking_intent"],
+        },
+      ],
+    },
+    {
+      id: "intent-edit-time",
+      turns: [
+        {
+          id: "user-message",
+          message: "book gp tomorrow 9am",
+          requireAllTools: ["extract_booking_intent", "search_services"],
+        },
+        {
+          id: "tap-no",
+          message: "no, change details",
+          requireReplyContains: ["change"],
+        },
+        {
+          id: "tap-edit-time",
+          message: "change time",
+          requireReplyContains: ["time"],
+        },
+      ],
+    },
+    {
+      id: "intent-free-text-edit",
+      turns: [
+        {
+          id: "user-message",
+          message: "book gp tomorrow 9am",
+          requireAllTools: ["extract_booking_intent", "search_services"],
+        },
+        {
+          id: "user-correction",
+          message: "actually make it 10am",
+          requireAllTools: ["extract_booking_intent", "get_clinic_availability"],
+          requireToolArgs: [{ tool: "extract_booking_intent", arg: "time", equals: "10:00" }],
+          requireReplyContains: ["confirm"],
+        },
+      ],
+    },
+    {
       id: "view-bookings-flow",
       turns: [
         {
