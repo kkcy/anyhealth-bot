@@ -596,6 +596,33 @@ async function sendInteractivePlan(
   ]);
 }
 
+async function postBookingConfirmCard(thread: any, state: ThreadState): Promise<void> {
+  const staged = state.pendingBooking;
+  if (!staged?.date) return;
+  const svc = (state.serviceOptions ?? []).find((s) => s.serviceId === state.activeServiceId);
+  const meth = svc?.methods.find((mm) => mm.methodId === state.activeMethodId);
+  const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
+  const doctor = (state.doctorOptions ?? []).find((d) => d.doctorId === state.activeDoctorId);
+  const summary = [
+    "Here are your booking details — does this look right?",
+    clinicOpt ? `Clinic: ${clinicOpt.clinicName}` : null,
+    svc ? `Service: ${svc.serviceName}${meth?.methodName ? ` (${meth.methodName})` : ""}` : null,
+    doctor ? `Doctor: ${doctor.name}` : null,
+    `Date: ${humanDay(staged.date)}`,
+    staged.time ? `Time: ${staged.time}` : null,
+    staged.address ? `Address: ${staged.address}` : null,
+    staged.reminderRemark ? `Note: ${staged.reminderRemark}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const sent = await sendReplyButtons(extractPhone(thread), summary, [
+    { id: "booking_confirm_yes", title: "Yes, confirm" },
+    { id: "booking_confirm_no", title: "Change details" },
+  ]);
+  if (!sent) await thread.post(summary);
+}
+
 export interface FakeThreadMessage {
   id: string;
   metadata: { dateSent: Date };
@@ -1030,28 +1057,28 @@ export async function handleMessage(thread: any, message: any) {
       return;
     }
     await updateState({ awaitingAddress: undefined });
+    await postBookingConfirmCard(thread, state);
+    return;
+  }
 
-    const svc = (state.serviceOptions ?? []).find((s) => s.serviceId === state.activeServiceId);
-    const meth = svc?.methods.find((mm) => mm.methodId === state.activeMethodId);
-    const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
-    const doctor = (state.doctorOptions ?? []).find((d) => d.doctorId === state.activeDoctorId);
-    const summary = [
-      "Here are your booking details — does this look right?",
-      clinicOpt ? `Clinic: ${clinicOpt.clinicName}` : null,
-      svc ? `Service: ${svc.serviceName}${meth?.methodName ? ` (${meth.methodName})` : ""}` : null,
-      doctor ? `Doctor: ${doctor.name}` : null,
-      `Date: ${humanDay(staged.date)}`,
-      staged.time ? `Time: ${staged.time}` : null,
-      `Address: ${addr}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    const sent = await sendReplyButtons(extractPhone(thread), summary, [
-      { id: "booking_confirm_yes", title: "Yes, confirm" },
-      { id: "booking_confirm_no", title: "Change details" },
-    ]);
-    if (!sent) await thread.post(summary);
+  if (state.awaitingRemark && !isInteractiveClick) {
+    const note = String(activeMessage?.text?.body ?? activeMessage?.text ?? "").trim();
+    if (!note) {
+      await thread.post("Please type the note text.");
+      return;
+    }
+    const updatedPending = state.pendingBooking
+      ? { ...state.pendingBooking, reminderRemark: note }
+      : undefined;
+    await updateState({
+      awaitingRemark: undefined,
+      pendingBooking: updatedPending,
+    });
+    if (updatedPending?.date && updatedPending?.time) {
+      await postBookingConfirmCard(thread, { ...state, awaitingRemark: undefined, pendingBooking: updatedPending });
+    } else {
+      await thread.post("Note saved.");
+    }
     return;
   }
 
@@ -1129,16 +1156,23 @@ export async function handleMessage(thread: any, message: any) {
       return;
     }
     if (interactiveReplyId === "booking_confirm_no") {
-      console.log(`[DET] booking_confirm_no`);
-      await updateState({
-        pendingBooking: undefined,
-        pendingBookingDate: undefined,
-        pendingIsNewPatient: undefined,
-        awaitingAddress: undefined,
-        awaitingTime: undefined,
-        awaitingDate: undefined,
+      console.log(`[DET] booking_confirm_no → edit picker`);
+      const sent = await sendInteractivePlan(extractPhone(thread), {
+        body: "What would you like to change?",
+        options: [
+          { id: "edit_service", title: "Service" },
+          { id: "edit_date", title: "Date" },
+          { id: "edit_time", title: "Time" },
+          { id: "edit_method", title: "Method" },
+          { id: "edit_note", title: "Add a note" },
+          { id: "cancel_booking", title: "Cancel booking" },
+        ],
       });
-      await thread.post("No problem — what would you like to change?");
+      if (!sent) {
+        await thread.post(
+          "What would you like to change? Reply with: service, date, time, method, note, or cancel."
+        );
+      }
       return;
     }
     if (interactiveReplyId === "NEAR_ME" && !state.lastLocation) {
@@ -1551,25 +1585,7 @@ export async function handleMessage(thread: any, message: any) {
     const data = parseJsonSafe(raw);
     console.log(`[DET] processSelectedTime->stage time=${time} needsConfirmation=${!!data?.needsConfirmation}`);
     await updateState({ awaitingTime: undefined });
-
-    const clinicOpt = (state.clinicOptions ?? []).find((c) => c.clinicId === state.activeClinicId);
-    const doctor = (state.doctorOptions ?? []).find((d) => d.doctorId === state.activeDoctorId);
-    const summary = [
-      "Here are your booking details — does this look right?",
-      clinicOpt ? `Clinic: ${clinicOpt.clinicName}` : null,
-      svc ? `Service: ${svc.serviceName}${meth?.methodName ? ` (${meth.methodName})` : ""}` : null,
-      doctor ? `Doctor: ${doctor.name}` : null,
-      `Date: ${humanDay(date)}`,
-      `Time: ${time}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    const sent = await sendReplyButtons(extractPhone(thread), summary, [
-      { id: "booking_confirm_yes", title: "Yes, confirm" },
-      { id: "booking_confirm_no", title: "Change details" },
-    ]);
-    if (!sent) await thread.post(summary);
+    await postBookingConfirmCard(thread, state);
   }
 
   if (interactiveReplyId?.startsWith("date_select_")) {
@@ -1626,6 +1642,142 @@ export async function handleMessage(thread: any, message: any) {
     }
   }
 
+  if (interactiveReplyId === "cancel_booking") {
+    console.log(`[DET] cancel_booking`);
+    await updateState({
+      activeClinicId: undefined,
+      activeServiceId: undefined,
+      activeMethodId: undefined,
+      activeDoctorId: undefined,
+      clinicOptions: undefined,
+      serviceOptions: undefined,
+      doctorOptions: undefined,
+      lastSearchQuery: undefined,
+      pendingBooking: undefined,
+      pendingBookingDate: undefined,
+      pendingIsNewPatient: undefined,
+      awaitingAddress: undefined,
+      awaitingTime: undefined,
+      awaitingDate: undefined,
+      awaitingRemark: undefined,
+      extractedIntent: undefined,
+    });
+    await thread.post("Booking cancelled. Let me know if you'd like to start a new one.");
+    return;
+  }
+
+  if (interactiveReplyId === "edit_service") {
+    console.log(`[DET] edit_service`);
+    await updateState({
+      activeServiceId: undefined,
+      activeMethodId: undefined,
+      pendingBookingDate: undefined,
+      pendingBooking: undefined,
+      awaitingAddress: undefined,
+      awaitingTime: undefined,
+      awaitingDate: undefined,
+      extractedIntent: state.extractedIntent
+        ? { ...state.extractedIntent, serviceKeyword: undefined, method: undefined, time: undefined, date: undefined }
+        : undefined,
+    });
+    const services = state.serviceOptions ?? [];
+    if (services.length === 0) {
+      await thread.post("Which service would you like? Reply with the service name.");
+      return;
+    }
+    const sent = await sendInteractivePlan(extractPhone(thread), {
+      body: "Which service?",
+      options: services.slice(0, 10).map((s, i) => ({
+        id: `service_select_${i + 1}`,
+        title: clip(s.serviceName, 24),
+        description: s.durationMinutes ? `${s.durationMinutes} min` : undefined,
+      })),
+    });
+    if (!sent) {
+      await thread.post("Which service? Reply with the service name.");
+    }
+    return;
+  }
+
+  if (interactiveReplyId === "edit_date") {
+    console.log(`[DET] edit_date`);
+    await updateState({
+      pendingBookingDate: undefined,
+      pendingBooking: undefined,
+      awaitingTime: undefined,
+      awaitingDate: undefined,
+      extractedIntent: state.extractedIntent
+        ? { ...state.extractedIntent, date: undefined, time: undefined }
+        : undefined,
+    });
+    await updateState({ awaitingDate: true });
+    await thread.post("Which date would you like? Reply with a date like 2026-05-15 or tap a quick option.");
+    return;
+  }
+
+  if (interactiveReplyId === "edit_time") {
+    console.log(`[DET] edit_time`);
+    await updateState({
+      pendingBooking: state.pendingBooking ? { ...state.pendingBooking, time: undefined } : undefined,
+      awaitingTime: undefined,
+      extractedIntent: state.extractedIntent
+        ? { ...state.extractedIntent, time: undefined }
+        : undefined,
+    });
+    if (!state.pendingBookingDate) {
+      await thread.post("Pick a date first, then I'll show available times.");
+      return;
+    }
+    const raw = await (tools as any).get_clinic_availability.execute({ date: state.pendingBookingDate });
+    const plan = buildInteractivePlanFromToolResults(
+      [{ toolName: "get_clinic_availability", result: raw }],
+      state
+    );
+    const sent = plan ? await sendInteractivePlan(extractPhone(thread), plan) : false;
+    if (!sent) {
+      await thread.post("Which time would you like? Reply with HH:mm.");
+    }
+    return;
+  }
+
+  if (interactiveReplyId === "edit_method") {
+    console.log(`[DET] edit_method`);
+    await updateState({
+      activeMethodId: undefined,
+      pendingBookingDate: undefined,
+      pendingBooking: undefined,
+      awaitingAddress: undefined,
+      awaitingTime: undefined,
+      awaitingDate: undefined,
+      extractedIntent: state.extractedIntent
+        ? { ...state.extractedIntent, method: undefined, date: undefined, time: undefined }
+        : undefined,
+    });
+    const svc = state.serviceOptions?.find((s) => s.serviceId === state.activeServiceId);
+    if (!svc || svc.methods.length === 0) {
+      await thread.post("Please pick a service first.");
+      return;
+    }
+    const sent = await sendInteractivePlan(extractPhone(thread), {
+      body: "Which method?",
+      options: svc.methods.slice(0, 10).map((m, i) => ({
+        id: `method_select_${i + 1}`,
+        title: clip(m.methodName, 24),
+      })),
+    });
+    if (!sent) {
+      await thread.post("Which method? Reply with: in-clinic, house call, or video.");
+    }
+    return;
+  }
+
+  if (interactiveReplyId === "edit_note") {
+    console.log(`[DET] edit_note → awaitingRemark`);
+    await updateState({ awaitingRemark: true });
+    await thread.post("Type the note you'd like attached to this booking.");
+    return;
+  }
+
   // Used downstream to force a search if the LLM replies with bare text on a
   // booking-intent message. Kept broad on purpose.
   const looksLikeNewBookingIntent =
@@ -1669,6 +1821,8 @@ export async function handleMessage(thread: any, message: any) {
       awaitingAddress: undefined,
       awaitingTime: undefined,
       awaitingDate: undefined,
+      awaitingRemark: undefined,
+      extractedIntent: undefined,
     });
   }
 
@@ -1693,6 +1847,12 @@ export async function handleMessage(thread: any, message: any) {
     "time_select_",
     "period_select_",
     "view_booking:",
+    "edit_service",
+    "edit_date",
+    "edit_time",
+    "edit_method",
+    "edit_note",
+    "cancel_booking",
   ];
   const deterministicTapIds = new Set([
     "NEAR_ME",
