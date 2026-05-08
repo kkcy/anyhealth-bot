@@ -245,7 +245,7 @@ export function parseMealActionFromText(text: string): MealAction | null {
 }
 
 function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
-  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 }
 
 function mapInteractiveReplyToText(

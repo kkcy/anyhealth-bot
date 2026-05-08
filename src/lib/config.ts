@@ -112,7 +112,7 @@ export async function generateText(
   for (const model of models) {
     try {
       return await aiGenerateText({
-        ...options,
+        ...(options as any),
         model,
       });
     } catch (err) {

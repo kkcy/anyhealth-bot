@@ -243,7 +243,7 @@ export function createLookupTools(
         .from("c_a_clinics")
         .select("id, name, address, dr_selection")
         .in("id", clinicIds);
-      data = fallback.data;
+      data = fallback.data ? fallback.data.map(row => ({ ...row, latitude: null, longitude: null })) : null;
       error = fallback.error;
     }
 
