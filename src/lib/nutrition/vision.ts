@@ -68,22 +68,52 @@ Set confidence in [0,1] per item.`;
 export async function visionIdentify(input: VisionIdentifyInput): Promise<VisionIdentifyOutput> {
   const schema = input.mode === "gemini-only" ? identifyWithMacrosSchema : identifyOnlySchema;
   const model = getModel();
+  const modelId = (model as any).modelId || "env-model";
 
-  const { object } = await generateObject({
-    model,
-    schema,
-    messages: [{
-      role: "user",
-      content: [
-        { type: "image", image: input.image },
-        { type: "text", text: buildPrompt(input.locale_hint, input.mode, input.edit_hint) },
-      ],
-    }],
+  const imageDescriptor =
+    typeof input.image === "string"
+      ? { kind: "url" as const, value: input.image }
+      : { kind: "binary" as const, byteLength: (input.image as any)?.byteLength ?? (input.image as any)?.length };
+
+  console.log("[VISION] identify start", {
+    mode: input.mode,
+    locale_hint: input.locale_hint,
+    edit_hint: input.edit_hint,
+    modelId,
+    image: imageDescriptor,
   });
 
-  return {
-    is_food: object.is_food,
-    items: object.items as VisionItem[],
-    visionModel: (model as any).modelId || "env-model",
-  };
+  try {
+    const { object } = await generateObject({
+      model,
+      schema,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", image: input.image },
+          { type: "text", text: buildPrompt(input.locale_hint, input.mode, input.edit_hint) },
+        ],
+      }],
+    });
+
+    console.log("[VISION] identify result", {
+      modelId,
+      is_food: object.is_food,
+      itemCount: Array.isArray(object.items) ? object.items.length : 0,
+      itemNames: Array.isArray(object.items) ? object.items.map((i: any) => i?.name).slice(0, 8) : [],
+    });
+
+    return {
+      is_food: object.is_food,
+      items: object.items as VisionItem[],
+      visionModel: modelId,
+    };
+  } catch (err) {
+    console.error("[VISION] identify failed", {
+      modelId,
+      mode: input.mode,
+      error: err instanceof Error ? { name: err.name, message: err.message } : err,
+    });
+    throw err;
+  }
 }

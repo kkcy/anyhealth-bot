@@ -90,6 +90,14 @@ export function createMealTools(
           confirmed_at: new Date().toISOString(),
         };
 
+        console.log("[MEAL] log_meal insert", {
+          phone,
+          patient_id: payload.patient_id,
+          photo_url: payload.photo_url,
+          itemCount: Array.isArray(payload.items) ? payload.items.length : 0,
+          total_kcal: payload.total_kcal,
+        });
+
         const { data, error } = await supabase
           .from("meal_logs")
           .insert(payload)
@@ -97,6 +105,13 @@ export function createMealTools(
           .single();
 
         if (error) {
+          console.error("[MEAL] log_meal insert failed", {
+            message: error.message,
+            code: (error as any).code,
+            details: (error as any).details,
+            hint: (error as any).hint,
+            payloadKeys: Object.keys(payload),
+          });
           return { success: false, error: "Failed to log meal", detail: error.message };
         }
         incrementMetric("meal_logged");

@@ -193,11 +193,36 @@ function extractLocation(message: any): { lat: number; lng: number } | undefined
 }
 
 function extractImageMediaId(message: any): string | undefined {
-  return (
+  // chat SDK normalizes Meta payload into a Message class with `.raw` =
+  // WhatsAppRawMessage = { message: WhatsAppInboundMessage, ... }. The image
+  // media id lives at message.raw.message.image.id. Older code paths and tests
+  // may still pass the raw inbound shape directly.
+  const id =
+    message?.raw?.message?.image?.id ??
     message?.image?.id ??
     message?.payload?.image?.id ??
-    message?.payload?.messages?.[0]?.image?.id
-  );
+    message?.payload?.messages?.[0]?.image?.id;
+
+  if (!id) {
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    const attachmentSummary = attachments.map((a: any) => ({
+      type: a?.type,
+      mimeType: a?.mimeType,
+      hasUrl: Boolean(a?.url),
+      hasData: Boolean(a?.data),
+      hasFetchData: typeof a?.fetchData === "function",
+    }));
+    console.log("[MEAL] extractImageMediaId miss", {
+      messageId: message?.id,
+      messageType: message?.raw?.message?.type ?? message?.type,
+      hasRaw: Boolean(message?.raw),
+      hasRawMessage: Boolean(message?.raw?.message),
+      rawImage: message?.raw?.message?.image ? { id: message.raw.message.image.id, mime: message.raw.message.image.mime_type } : undefined,
+      topLevelImage: message?.image,
+      attachments: attachmentSummary,
+    });
+  }
+  return id;
 }
 
 type MealAction =
@@ -779,14 +804,28 @@ export async function handleMessage(thread: any, message: any) {
   let deepLinkApplied = false;
 
   const incomingMediaId = extractImageMediaId(activeMessage);
+  console.log("[MEAL] image fast-path check", {
+    messageId: activeMessage?.id,
+    incomingMediaId: incomingMediaId ?? null,
+  });
   if (incomingMediaId) {
     try {
       const phone = state.phone || extractPhone(thread);
+      console.log("[MEAL] downloading media", { mediaId: incomingMediaId, phone });
       const media = await downloadWhatsAppMedia(incomingMediaId);
+      console.log("[MEAL] media downloaded", {
+        mediaId: incomingMediaId,
+        contentType: media.contentType,
+        bytes: media.buffer.length,
+      });
       const uploaded = await uploadMealPhoto({
         phone,
         bytes: bufferToArrayBuffer(media.buffer),
         mimeType: media.contentType,
+      });
+      console.log("[MEAL] photo uploaded", {
+        storagePath: uploaded.storagePath,
+        signedUrlPresent: Boolean(uploaded.signedUrl),
       });
 
       const raw = await (tools as any).analyze_food_photo.execute({
@@ -795,6 +834,12 @@ export async function handleMessage(thread: any, message: any) {
         localeHint: "MY",
       });
       const data = parseJsonSafe(raw);
+      console.log("[MEAL] vision result", {
+        is_food: data?.is_food,
+        itemCount: Array.isArray(data?.items) ? data.items.length : 0,
+        visionModel: data?.visionModel,
+        message: data?.message,
+      });
       if (!data?.is_food) {
         await thread.post(
           typeof data?.message === "string"
