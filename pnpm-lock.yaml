@@ -29,6 +29,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.49.0
         version: 2.100.1
+      '@vercel/functions':
+        specifier: ^3.5.0
+        version: 3.5.0
       ai:
         specifier: ^6.0.134
         version: 6.0.141(zod@4.3.6)
@@ -579,8 +582,21 @@ packages:
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
+  '@vercel/functions@3.5.0':
+    resolution: {integrity: sha512-+RokZ+4gkYyOsKBuJ29cQ8iSZG123LLJbZfPry20kkTgrN9U0277La4feP4DnWVo3sGoYa4plCEKY9XKUYoX9g==}
+    engines: {node: '>= 20'}
+    peerDependencies:
+      '@aws-sdk/credential-provider-web-identity': '*'
+    peerDependenciesMeta:
+      '@aws-sdk/credential-provider-web-identity':
+        optional: true
+
   '@vercel/oidc@3.1.0':
     resolution: {integrity: sha512-Fw28YZpRnA3cAHHDlkt7xQHiJ0fcL+NRcIqsocZQUSmbzeIKRpwttJjik5ZGanXP+vlA4SbTg+AbA3bP363l+w==}
+    engines: {node: '>= 20'}
+
+  '@vercel/oidc@3.4.0':
+    resolution: {integrity: sha512-p0sKfHkfRmMaqqDwNL4tjnX9TgRrLMlEtUjIxfrEns8pOxz1R9ztqOVI+ehqiq93/2/HnfPe/UBZkfAZwnx0UA==}
     engines: {node: '>= 20'}
 
   '@workflow/serde@4.1.0-beta.2':
@@ -1514,7 +1530,13 @@ snapshots:
     dependencies:
       '@types/node': 25.5.0
 
+  '@vercel/functions@3.5.0':
+    dependencies:
+      '@vercel/oidc': 3.4.0
+
   '@vercel/oidc@3.1.0': {}
+
+  '@vercel/oidc@3.4.0': {}
 
   '@workflow/serde@4.1.0-beta.2': {}
 

@@ -37,6 +37,7 @@
     "@chat-adapter/state-pg": "^4.20.2",
     "@chat-adapter/whatsapp": "^4.20.2",
     "@supabase/supabase-js": "^2.49.0",
+    "@vercel/functions": "^3.5.0",
     "ai": "^6.0.134",
     "chat": "^4.20.2",
     "google-auth-library": "^9.15.0",
