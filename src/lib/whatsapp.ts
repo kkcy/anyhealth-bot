@@ -333,6 +333,30 @@ export async function getWhatsAppMediaUrl(mediaId: string): Promise<string> {
 let _testMediaOverride: ((mediaId: string) => Promise<{ buffer: Buffer; contentType: string }>) | null = null;
 export function setTestMediaOverride(fn: typeof _testMediaOverride) { _testMediaOverride = fn; }
 
+export async function sendTypingIndicator(messageId: string): Promise<void> {
+  if (isTestMode() || !messageId) return;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!phoneNumberId || !accessToken) return;
+  try {
+    await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId,
+        typing_indicator: { type: "text" },
+      }),
+    });
+  } catch (err) {
+    console.warn("[WHATSAPP] sendTypingIndicator failed", err);
+  }
+}
+
 export async function downloadWhatsAppMedia(mediaId: string): Promise<{ buffer: Buffer; contentType: string }> {
   if (_testMediaOverride) return _testMediaOverride(mediaId);
   const url = await getWhatsAppMediaUrl(mediaId);

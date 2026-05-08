@@ -5,7 +5,7 @@ import { generateText } from "@/lib/config";
 import { createTools } from "./tools";
 import { buildSystemPrompt } from "./prompt";
 import { validateEnv } from "@/lib/env";
-import { sendListMessage, sendReplyButtons, sendLocationRequest } from "@/lib/whatsapp";
+import { sendListMessage, sendReplyButtons, sendLocationRequest, sendTypingIndicator } from "@/lib/whatsapp";
 import { downloadWhatsAppMedia } from "@/lib/whatsapp";
 import type { ThreadState } from "@/types";
 import { stepCountIs } from "ai";
@@ -760,8 +760,14 @@ export async function handleMessage(thread: any, message: any) {
     ? `text:"${clip(String(message.text.body), 80)}"`
     : "other";
   console.log(`[BOT] handleMessage thread=${thread.id} kind=${_msgKind}`);
+  const _perfStart = Date.now();
+  const _perf = (label: string) => console.log(`[PERF] ${label} +${Date.now() - _perfStart}ms`);
 
   await thread.startTyping?.();
+  if (message?.id) {
+    void sendTypingIndicator(message.id);
+  }
+  _perf("typing-fired");
 
   const state: ThreadState = (await thread.state) ?? {
     phone: extractPhone(thread),
@@ -1937,6 +1943,7 @@ export async function handleMessage(thread: any, message: any) {
   }
 
   console.log(`[LLM] History len=${history.length} last="${clip(String((history as any[])[history.length - 1]?.content ?? ""), 80)}"`);
+  _perf("pre-llm");
 
   try {
     let lastToolResults: any[] | undefined;
@@ -1962,6 +1969,7 @@ export async function handleMessage(thread: any, message: any) {
       stopWhen: stepCountIs(16),
       messages: history,
     });
+    _perf(`llm-done steps=${result.steps?.length ?? "?"}`);
 
     let effectiveText = result.text ?? "";
     let effectiveToolResults = lastToolResults;
@@ -2086,5 +2094,6 @@ export async function handleMessage(thread: any, message: any) {
       state.unknownSlugThisTurn = undefined;
       await thread.setState(state);
     }
+    _perf("handleMessage-end");
   }
 }
