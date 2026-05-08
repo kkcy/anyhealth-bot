@@ -552,10 +552,41 @@ export function createLookupTools(
           return JSON.stringify({ error: "Failed to search services", detail: serviceError.message });
         }
 
-        const scoredMatches = ((matchingServices ?? []) as ServiceCatalogRow[])
+        let scoredMatches = ((matchingServices ?? []) as ServiceCatalogRow[])
           .map((row) => scoreServiceMatch(row, words, normalizedQuery))
           .filter((x): x is RankedServiceMatch => Boolean(x))
           .sort((a, b) => b.score - a.score);
+
+        // Drop matches whose service has zero bookable c_a_service_info rows.
+        // Without this, a clinic surfaces in the picker because its catalog
+        // (c_a_service_list) has a keyword hit, but select_clinic then finds
+        // no bookable service_info rows and shows "couldn't find matching
+        // services at this clinic".
+        if (scoredMatches.length > 0) {
+          const candidateServiceIds = scoredMatches
+            .map((m) => m.row.id)
+            .filter(Boolean);
+          if (candidateServiceIds.length > 0) {
+            const { data: bookableRows, error: bookableError } = await supabase
+              .from("c_a_service_info")
+              .select("service_id")
+              .in("service_id", candidateServiceIds);
+            if (bookableError) {
+              return JSON.stringify({
+                error: "Failed to filter bookable services",
+                detail: bookableError.message,
+              });
+            }
+            const bookableServiceIds = new Set(
+              (bookableRows ?? [])
+                .map((r) => r.service_id as string | null)
+                .filter((id): id is string => Boolean(id))
+            );
+            scoredMatches = scoredMatches.filter((m) =>
+              bookableServiceIds.has(m.row.id)
+            );
+          }
+        }
 
         if (scoredMatches.length === 0) {
           await updateState({

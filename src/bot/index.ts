@@ -14,6 +14,7 @@ import { resolveClinicBySlug, resolveClinicByName } from "./clinic-resolver";
 import { sendWelcome } from "./messages/welcome";
 import { parseButtonPayload, handleButtonAction } from "./messages/button-router";
 import { uploadMealPhoto } from "@/lib/nutrition/photo-storage";
+import { getSupabase } from "@/lib/supabase";
 
 let _bot: ReturnType<typeof createBot> | null = null;
 
@@ -313,16 +314,66 @@ function parseUserDate(text: string): string | null {
   return null;
 }
 
-function buildDatePickerPlan(): InteractivePlan {
+async function buildDatePickerPlan(clinicId: string | undefined): Promise<InteractivePlan> {
   const today = ymdLocal(0);
   const tomorrow = ymdLocal(1);
   const dayAfter = ymdLocal(2);
+
+  let openDates: string[] | null = null;
+  if (clinicId) {
+    try {
+      const supabase = getSupabase();
+      const candidates = Array.from({ length: 14 }, (_, i) => ymdLocal(i));
+      const [{ data: hours }, { data: phRows }] = await Promise.all([
+        supabase
+          .from("c_a_clinic_time")
+          .select("*")
+          .eq("clinic_id", clinicId)
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from("c_a_ph")
+          .select("date")
+          .in("date", candidates),
+      ]);
+      const phSet = new Set((phRows ?? []).map((r: any) => String(r.date)));
+      if (hours) {
+        const out: string[] = [];
+        for (const ymd of candidates) {
+          const dayOfWeek = new Date(`${ymd}T12:00:00`)
+            .toLocaleDateString("en-US", { weekday: "long" })
+            .toLowerCase();
+          const isPh = phSet.has(ymd);
+          const dayKey = isPh ? "public_holiday" : dayOfWeek;
+          const startKey = `${dayKey}_start${isPh ? "" : "_time"}`;
+          const endKey = `${dayKey}_end${isPh ? "" : "_time"}`;
+          if ((hours as any)[startKey] && (hours as any)[endKey]) {
+            out.push(ymd);
+            if (out.length >= 3) break;
+          }
+        }
+        openDates = out;
+      }
+    } catch (err) {
+      console.log(`[DET] buildDatePickerPlan hours_fetch_failed ${(err as Error).message}`);
+    }
+  }
+
+  const dates = openDates && openDates.length > 0 ? openDates : [today, tomorrow, dayAfter];
+  const labelFor = (ymd: string) => {
+    if (ymd === today) return "Today";
+    if (ymd === tomorrow) return "Tomorrow";
+    return humanDay(ymd).split(",")[0];
+  };
+
   return {
     body: "Which day works for you?",
     options: [
-      { id: `date_select_${today}`, title: "Today", description: humanDay(today) },
-      { id: `date_select_${tomorrow}`, title: "Tomorrow", description: humanDay(tomorrow) },
-      { id: `date_select_${dayAfter}`, title: humanDay(dayAfter).split(",")[0], description: humanDay(dayAfter) },
+      ...dates.slice(0, 3).map((ymd) => ({
+        id: `date_select_${ymd}`,
+        title: labelFor(ymd),
+        description: humanDay(ymd),
+      })),
       { id: "date_select_other", title: "Other date", description: "Type a date like 2026-05-15" },
     ],
   };
@@ -1373,7 +1424,7 @@ export async function handleMessage(thread: any, message: any) {
   }
 
   async function sendDatePicker(): Promise<void> {
-    const plan = buildDatePickerPlan();
+    const plan = await buildDatePickerPlan(state.activeClinicId);
     const sent = await sendInteractivePlan(extractPhone(thread), plan);
     console.log(`[DET] sendDatePicker sent=${sent}`);
     if (!sent) {
@@ -1405,6 +1456,13 @@ export async function handleMessage(thread: any, message: any) {
   async function advanceToDateOrPatientGate(): Promise<void> {
     if (clinicHasNewPatientLimit() && state.pendingIsNewPatient === undefined) {
       await sendNewPatientGate();
+      return;
+    }
+    const stagedDate = state.extractedIntent?.date;
+    if (stagedDate && stagedDate >= ymdLocal(0)) {
+      console.log(`[DET] advanceToDate auto-using extractedIntent.date=${stagedDate}`);
+      await updateState({ pendingBookingDate: stagedDate, awaitingDate: undefined, awaitingTime: undefined });
+      await presentTimesForDate(stagedDate);
       return;
     }
     await sendDatePicker();
@@ -1590,6 +1648,12 @@ export async function handleMessage(thread: any, message: any) {
     if (slots.length === 0) {
       await thread.post(`No free time slots on ${humanDay(date)}. Please pick another date.`);
       await sendDatePicker();
+      return;
+    }
+    const stagedTime = state.extractedIntent?.time;
+    if (stagedTime && slots.includes(stagedTime)) {
+      console.log(`[DET] presentTimesForDate auto-using extractedIntent.time=${stagedTime}`);
+      await processSelectedTime(stagedTime);
       return;
     }
     // Up to 9 slots fit alongside an "Other time" row in one list.
