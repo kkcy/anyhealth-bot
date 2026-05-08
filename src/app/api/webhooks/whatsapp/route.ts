@@ -1,5 +1,9 @@
 import { getBot } from "@/bot";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request): Promise<Response> {
   return getBot().webhooks.whatsapp(request);
 }
