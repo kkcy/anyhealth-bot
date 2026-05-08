@@ -39,6 +39,7 @@
     "@supabase/supabase-js": "^2.49.0",
     "ai": "^6.0.134",
     "chat": "^4.20.2",
+    "google-auth-library": "^9.15.0",
     "next": "^16.2.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
