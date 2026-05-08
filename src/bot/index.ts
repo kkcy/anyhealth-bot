@@ -37,17 +37,22 @@ function isDuplicate(messageId: string | undefined): boolean {
 }
 
 function createBot() {
+  console.log("[BOT INIT] validateEnv start");
   validateEnv();
+  console.log("[BOT INIT] validateEnv ok");
   const adapters = {
     whatsapp: createWhatsAppAdapter(),
   };
-
+  console.log("[BOT INIT] whatsapp adapter ok");
+  const state = createPostgresState();
+  console.log("[BOT INIT] postgres state created");
   const bot = new Chat<typeof adapters, ThreadState>({
     userName: "anyhealth-bot",
     adapters,
-    state: createPostgresState(),
+    state,
     concurrency: "queue",
   });
+  console.log("[BOT INIT] Chat constructed");
 
   bot.onNewMention(async (thread, message) => {
     if (isDuplicate(message?.id)) {
