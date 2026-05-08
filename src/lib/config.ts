@@ -1,8 +1,21 @@
 import { generateText as aiGenerateText, type LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
-import { vertex } from "@ai-sdk/google-vertex";
+import { vertex as defaultVertex, createVertex } from "@ai-sdk/google-vertex";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
+
+let cachedVertex: ReturnType<typeof createVertex> | null = null;
+function getVertexProvider() {
+  if (cachedVertex) return cachedVertex;
+  const json = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  if (!json) return defaultVertex;
+  cachedVertex = createVertex({
+    project: process.env.GOOGLE_VERTEX_PROJECT,
+    location: process.env.GOOGLE_VERTEX_LOCATION,
+    googleAuthOptions: { credentials: JSON.parse(json) },
+  });
+  return cachedVertex;
+}
 
 /**
  * Creates a language model based on a provider/model string.
@@ -15,7 +28,7 @@ export function createModel(modelStr: string): LanguageModel {
     case "google":
       return google(modelId);
     case "vertex":
-      return vertex(modelId);
+      return getVertexProvider()(modelId);
     case "anthropic":
       return anthropic(modelId);
     case "openai":
