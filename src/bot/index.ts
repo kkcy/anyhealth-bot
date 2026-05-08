@@ -2071,6 +2071,29 @@ export async function handleMessage(thread: any, message: any) {
       }
     }
 
+    // Auto-pick single service when search_services already auto-selected
+    // the clinic. Without this, the deterministic picker shows a single
+    // tappable option and the LLM tends to write confusing method-picker
+    // language ("Which method would you prefer?") even though there is
+    // only one service to choose from.
+    {
+      const turnHasSingleServiceResult = (effectiveToolResults ?? []).some((r: any) => {
+        const data = parseJsonSafe(r?.result ?? r?.output ?? r?.toolResult ?? r?.value);
+        return data && typeof data === "object" && Array.isArray((data as any).services) && (data as any).services.length === 1;
+      });
+      if (
+        turnHasSingleServiceResult &&
+        state.activeClinicId &&
+        !state.activeServiceId &&
+        (state.serviceOptions?.length ?? 0) === 1
+      ) {
+        console.log("[GUARD] Auto-selecting single service post-LLM (clinic auto-picked)");
+        const svcRaw = await (tools as any).select_service.execute({ index: 1 });
+        const handled = await handleSelectServiceResult(svcRaw, "auto-single-service");
+        if (handled) return;
+      }
+    }
+
     if (effectiveText || effectiveToolResults?.length) {
       const planFromTools = buildInteractivePlanFromToolResults(effectiveToolResults, state);
       const planFromState = planFromTools ? undefined : buildInteractivePlanFromState(state);
