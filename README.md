@@ -134,7 +134,7 @@ CREATE TABLE patient_insurance (
 
 ### Existing tables used
 
-`whatsapp_users`, `patient_id`, `c_a_clinic_service`, `c_a_service_method`, `c_a_clinic_available_time`, `c_a_doctors`, `c_s_bookings`, `c_report_consult`, `actual_visiting_history`, `actual_diagnosis`
+`wa_user`, `patient`, `c_a_clinics`, `c_a_service_list`, `c_a_service_info`, `c_a_service_method`, `c_a_clinic_time`, `c_a_doctor`, `c_s_bookings`, `c_s_register`, `c_s_diagnosis`, `c_s_mc`, `c_s_invoice`
 
 ## Project Structure
 

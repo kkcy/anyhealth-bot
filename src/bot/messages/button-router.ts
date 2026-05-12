@@ -1,6 +1,7 @@
 import { muteClinic, unmuteClinic } from "@/lib/reminders/optout";
 import { getSupabase } from "@/lib/supabase";
 import type { ThreadState } from "@/types";
+import { chooseWaUserCandidate, phoneLookupVariants } from "../phone-user";
 
 export type ButtonAction =
   | { kind: "mute_clinic"; clinicId: string }
@@ -31,6 +32,13 @@ export interface HandleResult {
   hint?: string;
 }
 
+type ButtonPatientRow = {
+  id: string;
+  patient_name: string;
+  ic_passport?: string | null;
+  wa_user_id?: string | null;
+};
+
 export async function handleButtonAction(
   action: ButtonAction,
   ctx: {
@@ -43,32 +51,55 @@ export async function handleButtonAction(
   // Auto-lookup user if state is fresh/stale
   if (!ctx.thread.userId) {
     const sb = getSupabase();
-    const { data: user } = await sb
+    const variants = phoneLookupVariants(ctx.phone);
+    const { data: users } = await sb
       .from("wa_user")
-      .select("id, language")
-      .or(`phone_number.eq.${ctx.phone},phone_number.eq.+${ctx.phone}`)
-      .maybeSingle();
+      .select("id, phone_number, language")
+      .in("phone_number", variants);
 
-    if (user) {
+    if ((users ?? []).length > 0) {
+      const userIds = (users ?? []).map((u) => u.id);
       const { data: patients } = await sb
         .from("patient")
-        .select("id, patient_name, ic_passport")
-        .eq("wa_user_id", user.id);
+        .select("id, patient_name, ic_passport, wa_user_id")
+        .in("wa_user_id", userIds);
 
-      const patientRefs = (patients ?? []).map((p) => ({
+      const patientsByUser = new Map<string, ButtonPatientRow[]>();
+      for (const p of (patients ?? []) as ButtonPatientRow[]) {
+        if (!p.wa_user_id) continue;
+        const rows = patientsByUser.get(p.wa_user_id) ?? [];
+        rows.push(p);
+        patientsByUser.set(p.wa_user_id, rows);
+      }
+
+      const chosen = chooseWaUserCandidate(
+        (users ?? []).map((u) => ({
+          id: u.id,
+          phone_number: u.phone_number,
+          language: u.language ?? null,
+          patientCount: patientsByUser.get(u.id)?.length ?? 0,
+        })),
+        ctx.phone
+      );
+      const user = chosen ? (users ?? []).find((u) => u.id === chosen.id) : null;
+      const selectedPatients = user ? patientsByUser.get(user.id) ?? [] : [];
+
+      const patientRefs = selectedPatients.map((p) => ({
         id: p.id,
         name: p.patient_name,
         ic: p.ic_passport ?? "",
       }));
 
-      await ctx.updateThread({
-        userId: user.id,
-        patients: patientRefs,
-        activePatientId: patientRefs.length === 1 ? patientRefs[0].id : undefined,
-        language: user.language ?? undefined,
-      });
-      // Refresh local state object for the remainder of this function
-      ctx.thread.userId = user.id;
+      if (user) {
+        await ctx.updateThread({
+          userId: user.id,
+          patients: patientRefs,
+          activePatientId: patientRefs.length === 1 ? patientRefs[0].id : undefined,
+          language: user.language ?? undefined,
+        });
+        // Refresh local state object for the remainder of this function
+        ctx.thread.userId = user.id;
+      }
     }
   }
 

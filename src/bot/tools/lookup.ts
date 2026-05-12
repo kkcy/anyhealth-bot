@@ -5,6 +5,7 @@ import { GoogleAuth } from "google-auth-library";
 import type { ThreadState, ClinicOption, ServiceOption, MethodOption, DoctorOption } from "@/types";
 import { haversineKm } from "@/lib/geo";
 import { buildServiceOptions, type ServiceInfoRow } from "./service-options";
+import { canonicalPhoneForInsert, chooseWaUserCandidate, phoneLookupVariants } from "../phone-user";
 
 type ServiceCatalogRow = {
   id: string;
@@ -25,6 +26,13 @@ type CachedSearchResult = {
   matchConfidence: "high" | "medium" | "low";
   rerankSource: "vertex-ranking-api" | "heuristic";
   cachedAt: number;
+};
+
+type LookupPatientRow = {
+  id: string;
+  patient_name: string;
+  ic_passport?: string | null;
+  wa_user_id?: string | null;
 };
 
 const SEARCH_CACHE_TTL_MS = Number(process.env.SERVICE_SEARCH_CACHE_TTL_MS ?? 12 * 60 * 60 * 1000);
@@ -363,21 +371,51 @@ export function createLookupTools(
           return "Could not determine sender identity. WhatsApp is required.";
         }
 
-        const { data: existingUser, error: userError } = await supabase
+        const variants = phoneLookupVariants(state.phone);
+        const { data: existingUsers, error: userError } = await supabase
           .from("wa_user")
           .select("id, username, phone_number, language")
-          .or(`phone_number.eq.${state.phone},phone_number.eq.+${state.phone}`)
-          .limit(1)
-          .maybeSingle();
+          .in("phone_number", variants);
 
         if (userError) {
           return JSON.stringify({ error: "Failed to look up user", detail: userError.message });
         }
 
-        let user = existingUser;
+        let user = null as NonNullable<typeof existingUsers>[number] | null;
+        let patientRows: LookupPatientRow[] = [];
+        if ((existingUsers ?? []).length > 0) {
+          const userIds = (existingUsers ?? []).map((u) => u.id);
+          const { data: allPatients, error: patientError } = await supabase
+            .from("patient")
+            .select("id, patient_name, ic_passport, wa_user_id")
+            .in("wa_user_id", userIds);
+
+          if (patientError) {
+            return JSON.stringify({ error: "Failed to load patients", detail: patientError.message });
+          }
+
+          const patientsByUser = new Map<string, LookupPatientRow[]>();
+          for (const p of (allPatients ?? []) as LookupPatientRow[]) {
+            if (!p.wa_user_id) continue;
+            const rows = patientsByUser.get(p.wa_user_id) ?? [];
+            rows.push(p);
+            patientsByUser.set(p.wa_user_id, rows);
+          }
+
+          const chosen = chooseWaUserCandidate(
+            (existingUsers ?? []).map((u) => ({
+              ...u,
+              patientCount: patientsByUser.get(u.id)?.length ?? 0,
+            })),
+            state.phone
+          );
+          user = chosen ? (existingUsers ?? []).find((u) => u.id === chosen.id) ?? null : null;
+          patientRows = user ? patientsByUser.get(user.id) ?? [] : [];
+        }
+
         let createdNow = false;
         if (!user) {
-          const canonicalPhone = state.phone.startsWith("+") ? state.phone : `+${state.phone}`;
+          const canonicalPhone = canonicalPhoneForInsert(state.phone);
           // Upsert on phone_number to dodge a webhook-retry race that could
           // otherwise insert two wa_user rows for the same phone.
           const { data: created, error: createError } = await supabase
@@ -399,16 +437,7 @@ export function createLookupTools(
           console.log(`[USER_LOOKUP] Auto-created wa_user id=${user.id} phone=${canonicalPhone}`);
         }
 
-        const { data: patients, error: patientError } = await supabase
-          .from("patient")
-          .select("id, patient_name, ic_passport")
-          .eq("wa_user_id", user.id);
-
-        if (patientError) {
-          return JSON.stringify({ error: "Failed to load patients", detail: patientError.message });
-        }
-
-        const patientRefs = (patients ?? []).map((p) => ({
+        const patientRefs = patientRows.map((p) => ({
           id: p.id,
           name: p.patient_name,
           ic: p.ic_passport ?? "",
@@ -426,7 +455,7 @@ export function createLookupTools(
           createdNow,
           userName: user.username,
           language: user.language,
-          patients: patientRefs.map((p, i) => ({ index: i + 1, name: p.name, ic: p.ic.slice(-4) })),
+          patients: patientRefs.map((p, i) => ({ index: i + 1, name: p.name })),
           patientCount: patientRefs.length,
         });
       },

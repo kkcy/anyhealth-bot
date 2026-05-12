@@ -94,10 +94,10 @@ const DEFAULT_PHONE = process.env.SMOKE_PHONE ?? "60123456789";
 const SMOKE_PROFILES: Record<string, SmokeProfile> = {
   "zhang-rong": {
     phone: "60124850128",
-    patientName: "Zhang Rong",
+    patientName: "Mah Zhang Rong",
     documentQuery: "flu",
-    documentDateFrom: "2026-01-11",
-    documentDateTo: "2026-01-16",
+    documentDateFrom: "2026-05-06",
+    documentDateTo: "2026-05-06",
   },
 };
 

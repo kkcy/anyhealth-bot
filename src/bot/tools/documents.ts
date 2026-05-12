@@ -9,29 +9,25 @@ interface PatientRow {
   ic_passport?: string | null;
 }
 
-interface VisitRow {
+interface RegisterRow {
   id: string;
   patient_id: string;
-  visit_datetime: string | null;
-  provider_cat: string | null;
-  doctor_id: string | null;
+  datetime: string | null;
+  status: string | null;
+  clinic_id: string | null;
+  booking_id: string | null;
+  service_info_id: string | null;
 }
 
 interface DiagnosisRow {
   id: string;
-  vh_id: string;
+  reg_id: string;
   diagnosis: string | null;
   remark: string | null;
-  created_at: string | null;
-}
-
-interface ReportRow {
-  id: string;
-  case_id: string;
-  pdf_url: string | null;
-  service_name: string | null;
-  time: string | null;
-  doctor_id: string | null;
+  icd10_code: string | null;
+  status: string | null;
+  start_time: string | null;
+  end_time: string | null;
 }
 
 interface DocumentItem {
@@ -44,6 +40,21 @@ interface DocumentItem {
 }
 
 type GenericDocRow = Record<string, unknown>;
+
+export function formatDocumentTableError(
+  table: string,
+  error: { message?: string } | null | undefined
+): { error: string; detail: string; instruction: string } | null {
+  const message = error?.message ?? "";
+  if (!message) return null;
+  if (!/schema cache|does not exist|Could not find the table/i.test(message)) return null;
+  return {
+    error: "Document data source unavailable",
+    detail: `${table}: ${message}`,
+    instruction:
+      "Tell the user document retrieval is temporarily unavailable and ask an operator to expose or configure the document tables.",
+  };
+}
 
 export function createDocumentTools(
   state: ThreadState,
@@ -256,7 +267,7 @@ export function createDocumentTools(
     search_documents: tool({
       description:
         "Search consultation reports and documents for verified users across all linked patients. " +
-        "Maps patient_id -> actual_visiting_history.id (vh_id) -> actual_diagnosis and related document tables. " +
+        "Maps patient_id -> c_s_register.id (reg_id) -> c_s_diagnosis and related document tables. " +
         "Can filter by date range or search by diagnosis/remark text. " +
         "Requires identity verification first.",
       inputSchema: z.object({
@@ -308,34 +319,43 @@ export function createDocumentTools(
           return JSON.stringify({ found: false, message: "No linked patients found for this account." });
         }
 
-        // 2) Find visits for all linked patients.
-        let visitQuery = supabase
-          .from("actual_visiting_history")
-          .select("id, patient_id, visit_datetime, provider_cat, doctor_id")
+        // 2) Find register/visit rows for all linked patients.
+        let registerQuery = supabase
+          .from("c_s_register")
+          .select("id, patient_id, datetime, status, clinic_id, booking_id, service_info_id")
           .in("patient_id", patientIds)
-          .order("visit_datetime", { ascending: false });
+          .order("datetime", { ascending: false });
 
         if (dateFrom) {
-          visitQuery = visitQuery.gte("visit_datetime", `${dateFrom}T00:00:00`);
+          registerQuery = registerQuery.gte("datetime", `${dateFrom}T00:00:00`);
         }
         if (dateTo) {
-          visitQuery = visitQuery.lte("visit_datetime", `${dateTo}T23:59:59`);
+          registerQuery = registerQuery.lte("datetime", `${dateTo}T23:59:59`);
         }
 
-        const { data: visits, error: visitError } = await visitQuery.limit(100);
+        const { data: registers, error: registerError } = await registerQuery.limit(100);
 
-        if (visitError || !visits || visits.length === 0) {
+        const registerTableError = formatDocumentTableError("c_s_register", registerError);
+        if (registerTableError) {
+          return JSON.stringify(registerTableError);
+        }
+
+        if (registerError) {
+          return JSON.stringify({ error: "Failed to load consultation records", detail: registerError.message });
+        }
+
+        if (!registers || registers.length === 0) {
           return JSON.stringify({ found: false, message: "No consultation records found for this period." });
         }
 
-        const visitRows = visits as VisitRow[];
-        const vhIds = visitRows.map((v) => v.id);
+        const registerRows = registers as RegisterRow[];
+        const regIds = registerRows.map((v) => v.id);
 
-        // 3) Map visiting history IDs to diagnosis rows.
+        // 3) Map register IDs to diagnosis rows.
         let diagQuery = supabase
-          .from("actual_diagnosis")
-          .select("id, vh_id, diagnosis, remark, created_at")
-          .in("vh_id", vhIds);
+          .from("c_s_diagnosis")
+          .select("id, reg_id, diagnosis, icd10_code, remark, status, start_time, end_time")
+          .in("reg_id", regIds);
 
         if (query) {
           diagQuery = diagQuery.or(`diagnosis.ilike.%${query}%,remark.ilike.%${query}%`);
@@ -343,17 +363,21 @@ export function createDocumentTools(
 
         const { data: diagnoses, error: diagnosisError } = await diagQuery;
         if (diagnosisError) {
+          const diagnosisTableError = formatDocumentTableError("c_s_diagnosis", diagnosisError);
+          if (diagnosisTableError) {
+            return JSON.stringify(diagnosisTableError);
+          }
           return JSON.stringify({ error: "Failed to load diagnosis records", detail: diagnosisError.message });
         }
         const diagnosisRows = (diagnoses ?? []) as DiagnosisRow[];
 
-        const targetVhIdSet = new Set<string>(
+        const targetRegIdSet = new Set<string>(
           query
-            ? diagnosisRows.map((d) => d.vh_id).filter(Boolean)
-            : vhIds
+            ? diagnosisRows.map((d) => d.reg_id).filter(Boolean)
+            : regIds
         );
 
-        if (targetVhIdSet.size === 0) {
+        if (targetRegIdSet.size === 0) {
           return JSON.stringify({
             found: false,
             message: query
@@ -362,43 +386,29 @@ export function createDocumentTools(
           });
         }
 
-        const targetVhIds = Array.from(targetVhIdSet);
+        const targetRegIds = Array.from(targetRegIdSet);
 
-        // 4) Fetch all related documents by same visit IDs.
-        const { data: reports, error: reportError } = await supabase
-          .from("c_report_consult")
-          .select("id, case_id, pdf_url, service_name, time, doctor_id")
-          .in("case_id", targetVhIds)
-          .eq("is_deleted", false)
-          .eq("sent", true)
-          .order("time", { ascending: false });
-        if (reportError) {
-          return JSON.stringify({ error: "Failed to load consultation reports", detail: reportError.message });
-        }
-        const reportRows = (reports ?? []) as ReportRow[];
-
-        const [mcDocs, invoiceDocs, referralDocs] = await Promise.all([
-          fetchTableDocumentsByVisitIds("actual_mc", targetVhIds),
-          fetchTableDocumentsByVisitIds("actual_invoice", targetVhIds),
-          fetchTableDocumentsByVisitIds("actual_referral", targetVhIds),
+        // 4) Fetch all related documents by same register IDs.
+        const [mcResult, invoiceResult] = await Promise.all([
+          supabase
+            .from("c_s_mc")
+            .select("id, reg_id, start_date, end_date, pdf")
+            .in("reg_id", targetRegIds),
+          supabase
+            .from("c_s_invoice")
+            .select("id, reg_id, status, list, price, subtotal, tax, amount, discount, confirm, created_at")
+            .in("reg_id", targetRegIds),
         ]);
 
         const warningDetails = [
-          mcDocs.error ? `actual_mc: ${mcDocs.error}` : null,
-          invoiceDocs.error ? `actual_invoice: ${invoiceDocs.error}` : null,
-          referralDocs.error ? `actual_referral: ${referralDocs.error}` : null,
+          mcResult.error ? `c_s_mc: ${mcResult.error.message}` : null,
+          invoiceResult.error ? `c_s_invoice: ${invoiceResult.error.message}` : null,
         ].filter(Boolean) as string[];
 
         const diagnosisByVisit: Record<string, DiagnosisRow[]> = {};
         for (const d of diagnosisRows) {
-          if (!diagnosisByVisit[d.vh_id]) diagnosisByVisit[d.vh_id] = [];
-          diagnosisByVisit[d.vh_id].push(d);
-        }
-
-        const reportByVisit: Record<string, ReportRow[]> = {};
-        for (const r of reportRows) {
-          if (!reportByVisit[r.case_id]) reportByVisit[r.case_id] = [];
-          reportByVisit[r.case_id].push(r);
+          if (!diagnosisByVisit[d.reg_id]) diagnosisByVisit[d.reg_id] = [];
+          diagnosisByVisit[d.reg_id].push(d);
         }
 
         const docsByVisit: Record<string, DocumentItem[]> = {};
@@ -407,68 +417,70 @@ export function createDocumentTools(
           docsByVisit[doc.visitId].push(doc);
         };
 
-        for (const r of reportRows) {
+        for (const d of diagnosisRows) {
           pushDoc({
-            type: "consult_report",
-            sourceTable: "c_report_consult",
-            visitId: r.case_id,
-            documentId: r.id,
-            url: r.pdf_url ?? null,
-            title: r.service_name ?? "Consultation Report",
+            type: "diagnosis",
+            sourceTable: "c_s_diagnosis",
+            visitId: d.reg_id,
+            documentId: d.id,
+            url: null,
+            title: d.diagnosis ?? "Diagnosis",
           });
         }
 
-        const appendGenericDocs = (
-          tableName: "actual_mc" | "actual_invoice" | "actual_referral",
-          docs: { rows: GenericDocRow[]; matchColumn: string | null }
-        ) => {
-          if (!docs.matchColumn) return;
+        for (const row of (mcResult.data ?? []) as GenericDocRow[]) {
+          const regId = asString(row.reg_id);
+          if (!regId || !targetRegIdSet.has(regId)) continue;
+          const start = asString(row.start_date);
+          const end = asString(row.end_date);
+          pushDoc({
+            type: "mc",
+            sourceTable: "c_s_mc",
+            visitId: regId,
+            documentId: asString(row.id),
+            url: pickDocumentUrl(row),
+            title: start && end ? `Medical Certificate ${start} to ${end}` : "Medical Certificate",
+          });
+        }
 
-          const typeMap: Record<typeof tableName, string> = {
-            actual_mc: "mc",
-            actual_invoice: "invoice",
-            actual_referral: "referral",
-          };
-
-          for (const row of docs.rows) {
-            const visitId = asString(row[docs.matchColumn]);
-            if (!visitId || !targetVhIdSet.has(visitId)) continue;
-            pushDoc({
-              type: typeMap[tableName],
-              sourceTable: tableName,
-              visitId,
-              documentId: asString(row.id),
-              url: pickDocumentUrl(row),
-              title: pickDocumentTitle(row),
-            });
-          }
-        };
-
-        appendGenericDocs("actual_mc", mcDocs);
-        appendGenericDocs("actual_invoice", invoiceDocs);
-        appendGenericDocs("actual_referral", referralDocs);
+        for (const row of (invoiceResult.data ?? []) as GenericDocRow[]) {
+          const regId = asString(row.reg_id);
+          if (!regId || !targetRegIdSet.has(regId)) continue;
+          const amount = asString(row.amount);
+          pushDoc({
+            type: "invoice",
+            sourceTable: "c_s_invoice",
+            visitId: regId,
+            documentId: asString(row.id),
+            url: pickDocumentUrl(row),
+            title: amount ? `Invoice RM ${amount}` : "Invoice",
+          });
+        }
 
         // 5) Build user-facing result grouped by visit.
-        const targetVisits = visitRows.filter((v) => targetVhIdSet.has(v.id));
+        const targetVisits = registerRows.filter((v) => targetRegIdSet.has(v.id));
         const results = targetVisits.map((visit) => {
           const diagnosesForVisit = diagnosisByVisit[visit.id] ?? [];
           const firstDiag = diagnosesForVisit[0];
-          const firstReport = (reportByVisit[visit.id] ?? [])[0];
+          const firstDocWithUrl = (docsByVisit[visit.id] ?? []).find((doc) => doc.url);
 
           return {
             patientId: visit.patient_id,
             patientName: patientNameMap[visit.patient_id] ?? null,
             visitId: visit.id,
-            visitDate: visit.visit_datetime,
+            visitDate: visit.datetime,
             diagnosis: firstDiag?.diagnosis ?? null,
             remark: firstDiag?.remark ?? null,
             diagnoses: diagnosesForVisit.map((d) => ({
               diagnosis: d.diagnosis,
+              icd10Code: d.icd10_code,
               remark: d.remark,
-              createdAt: d.created_at,
+              status: d.status,
+              startTime: d.start_time,
+              endTime: d.end_time,
             })),
-            pdfUrl: firstReport?.pdf_url ?? null,
-            serviceName: firstReport?.service_name ?? null,
+            pdfUrl: firstDocWithUrl?.url ?? null,
+            serviceName: null,
             documents: docsByVisit[visit.id] ?? [],
           };
         });

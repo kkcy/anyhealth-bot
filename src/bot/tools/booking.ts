@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getSupabase } from "@/lib/supabase";
 import type { ThreadState } from "@/types";
 import { recomputeReminders } from "@/lib/reminders/scheduler";
+import { canonicalPhoneForInsert, chooseWaUserCandidate, phoneLookupVariants } from "../phone-user";
 
 function normalizeNewPatientLimit(value: unknown): number | null {
   if (value === null || value === undefined) return null;
@@ -168,20 +169,44 @@ export function createBookingTools(
           if (!state.phone) {
             return JSON.stringify({ error: "Could not determine sender identity. WhatsApp is required." });
           }
-          const canonicalPhone = state.phone.startsWith("+") ? state.phone : `+${state.phone}`;
-          const { data: user, error: userError } = await supabase
+          const variants = phoneLookupVariants(state.phone);
+          const { data: existingUsers, error: lookupError } = await supabase
             .from("wa_user")
-            .upsert(
-              { phone_number: canonicalPhone, username: canonicalPhone },
-              { onConflict: "phone_number" }
-            )
-            .select("id")
-            .single();
-          if (userError || !user) {
+            .select("id, phone_number")
+            .in("phone_number", variants);
+          if (lookupError) {
             return JSON.stringify({
               error: "Failed to initialize user for booking",
-              detail: userError?.message ?? "unknown",
+              detail: lookupError.message,
             });
+          }
+
+          let user = chooseWaUserCandidate(
+            (existingUsers ?? []).map((u) => ({
+              id: u.id,
+              phone_number: u.phone_number,
+              patientCount: 0,
+            })),
+            state.phone
+          );
+
+          if (!user) {
+            const canonicalPhone = canonicalPhoneForInsert(state.phone);
+            const { data: created, error: userError } = await supabase
+              .from("wa_user")
+              .upsert(
+                { phone_number: canonicalPhone, username: canonicalPhone },
+                { onConflict: "phone_number" }
+              )
+              .select("id, phone_number")
+              .single();
+            if (userError || !created) {
+              return JSON.stringify({
+                error: "Failed to initialize user for booking",
+                detail: userError?.message ?? "unknown",
+              });
+            }
+            user = { ...created, patientCount: 0 };
           }
           await updateState({ userId: user.id });
         }
