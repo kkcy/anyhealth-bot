@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "codegen:api": "openapi-typescript ../anyhealth-fullstack/docs/api/openapi.json -o src/lib/api-types.ts",
     "test:tools": "tsx --tsconfig tsconfig.json scripts/test-tools.ts",
     "test:guards": "tsx --tsconfig tsconfig.json scripts/test-guards.ts",
     "test:smoke": "tsx --tsconfig tsconfig.json scripts/test-smoke.ts",
@@ -42,6 +43,7 @@
     "chat": "^4.20.2",
     "google-auth-library": "^9.15.0",
     "next": "^16.2.1",
+    "openapi-fetch": "^0.17.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "zod": "^4.3.6"
@@ -51,6 +53,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "dotenv": "^17.3.1",
+    "openapi-typescript": "^7.13.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
