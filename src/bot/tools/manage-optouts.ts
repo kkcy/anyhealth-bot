@@ -1,7 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { listMutedClinics, unmuteClinic } from "@/lib/reminders/optout";
-import { getSupabase } from "@/lib/supabase";
 import type { ThreadState } from "@/types";
 
 interface ToolDeps {
@@ -29,13 +28,10 @@ export function manageOptoutsTools({ state }: ToolDeps) {
         if (ids.length === 0) {
           return JSON.stringify({ muted: [], message: "No clinics currently muted." });
         }
-        const sb = getSupabase();
-        const { data: clinics } = await sb
-          .from("c_a_clinics")
-          .select("id, name")
-          .in("id", ids);
+        const cached = state.clinicOptions ?? [];
+        const byId = new Map(cached.map((c) => [c.clinicId, c.clinicName]));
         return JSON.stringify({
-          muted: (clinics ?? []).map((c) => ({ id: c.id, name: c.name })),
+          muted: ids.map((id) => ({ id, name: byId.get(id) ?? null })),
         });
       },
     }),
