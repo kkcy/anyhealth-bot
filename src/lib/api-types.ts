@@ -28,10 +28,96 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List bookings for the calling WhatsApp user */
+        get: operations["botListBookings"];
         put?: never;
         /** Create a booking via the WhatsApp bot */
         post: operations["createBotBooking"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bot/bookings/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a single booking by ID (caller phone must match) */
+        get: operations["botGetBooking"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bot/bookings/{id}/reschedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reschedule a booking (caller phone must match) */
+        post: operations["botRescheduleBooking"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bot/bookings/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a booking (caller phone must match) */
+        post: operations["botCancelBooking"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bot/clinics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List all active clinics available for booking */
+        get: operations["botListClinics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bot/clinics/{id}/doctors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List doctors available at a specific clinic */
+        get: operations["botListClinicDoctors"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -137,6 +223,23 @@ export interface paths {
         post: operations["createBotOptout"];
         /** Remove an opt-out (re-subscribe) for a phone number */
         delete: operations["deleteBotOptout"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bot/services/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Cross-org keyword search for services with optional geo ranking */
+        get: operations["botSearchServices"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2683,6 +2786,114 @@ export interface operations {
             };
         };
     };
+    botListBookings: {
+        parameters: {
+            query: {
+                /** @description RFC 4122 UUID */
+                waUserId: string;
+                futureOnly?: "true" | "false";
+                status?: "pending" | "confirmed" | "rescheduled" | "cancelled" | "no_show" | "completed";
+                limit?: number;
+            };
+            header: {
+                /** @description Bearer <BOT_API_KEY> */
+                authorization: string;
+                /** @description Caller WhatsApp phone number */
+                "x-bot-phone": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Bookings belonging to the caller */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            organizationId: string;
+                            /** Format: uuid */
+                            waUserId: string;
+                            /** Format: uuid */
+                            serviceVariantId: string;
+                            status: string;
+                            originalDate: string | null;
+                            originalTime: string | null;
+                            rescheduleDate: string | null;
+                            rescheduleTime: string | null;
+                            address: string | null;
+                            remark: string | null;
+                            createdBy: string | null;
+                            updatedBy: string | null;
+                            createdAt: string;
+                            updatedAt: string;
+                            deletedAt: string | null;
+                            deletedReason: string | null;
+                        }[];
+                    };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
     createBotBooking: {
         parameters: {
             query?: never;
@@ -2750,6 +2961,513 @@ export interface operations {
                             deletedReason: string | null;
                         };
                         scheduledNotificationIds: string[];
+                    };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    botGetBooking: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Bearer <BOT_API_KEY> */
+                authorization: string;
+                /** @description Caller WhatsApp phone number */
+                "x-bot-phone": string;
+            };
+            path: {
+                /** @description Booking ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Booking row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            organizationId: string;
+                            /** Format: uuid */
+                            waUserId: string;
+                            /** Format: uuid */
+                            serviceVariantId: string;
+                            status: string;
+                            originalDate: string | null;
+                            originalTime: string | null;
+                            rescheduleDate: string | null;
+                            rescheduleTime: string | null;
+                            address: string | null;
+                            remark: string | null;
+                            createdBy: string | null;
+                            updatedBy: string | null;
+                            createdAt: string;
+                            updatedAt: string;
+                            deletedAt: string | null;
+                            deletedReason: string | null;
+                        };
+                    };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    botRescheduleBooking: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Bearer <BOT_API_KEY> */
+                authorization: string;
+                /** @description Caller WhatsApp phone number */
+                "x-bot-phone": string;
+            };
+            path: {
+                /** @description Booking ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: date */
+                    rescheduleDate: string;
+                    rescheduleTime: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Booking rescheduled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            organizationId: string;
+                            /** Format: uuid */
+                            waUserId: string;
+                            /** Format: uuid */
+                            serviceVariantId: string;
+                            status: string;
+                            originalDate: string | null;
+                            originalTime: string | null;
+                            rescheduleDate: string | null;
+                            rescheduleTime: string | null;
+                            address: string | null;
+                            remark: string | null;
+                            createdBy: string | null;
+                            updatedBy: string | null;
+                            createdAt: string;
+                            updatedAt: string;
+                            deletedAt: string | null;
+                            deletedReason: string | null;
+                        };
+                        cancelledNotificationIds: string[];
+                        scheduledNotificationIds: string[];
+                    };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    botCancelBooking: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Bearer <BOT_API_KEY> */
+                authorization: string;
+                /** @description Caller WhatsApp phone number */
+                "x-bot-phone": string;
+            };
+            path: {
+                /** @description Booking ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Booking cancelled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            organizationId: string;
+                            /** Format: uuid */
+                            waUserId: string;
+                            /** Format: uuid */
+                            serviceVariantId: string;
+                            status: string;
+                            originalDate: string | null;
+                            originalTime: string | null;
+                            rescheduleDate: string | null;
+                            rescheduleTime: string | null;
+                            address: string | null;
+                            remark: string | null;
+                            createdBy: string | null;
+                            updatedBy: string | null;
+                            createdAt: string;
+                            updatedAt: string;
+                            deletedAt: string | null;
+                            deletedReason: string | null;
+                        };
+                        cancelledNotificationIds: string[];
+                    };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    botListClinics: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Bearer <BOT_API_KEY> */
+                authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of clinic organisations */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            name: string;
+                            address: string | null;
+                            latitude: string | null;
+                            longitude: string | null;
+                            /** @enum {string} */
+                            clinicType: "western" | "tcm" | "mixed";
+                            drSelection: boolean;
+                        }[];
+                    };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    botListClinicDoctors: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Bearer <BOT_API_KEY> */
+                authorization: string;
+            };
+            path: {
+                /** @description Clinic organisation ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of doctors at the clinic */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            name: string;
+                        }[];
                     };
                 };
             };
@@ -3630,6 +4348,101 @@ export interface operations {
             };
         };
     };
+    botSearchServices: {
+        parameters: {
+            query: {
+                query: string;
+                lat?: number | null;
+                lng?: number | null;
+                limit?: number;
+            };
+            header: {
+                /** @description Bearer <BOT_API_KEY> */
+                authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Matching service variants across clinics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            clinicId: string;
+                            clinicName: string;
+                            clinicAddress: string | null;
+                            /** Format: uuid */
+                            serviceVariantId: string;
+                            serviceName: string;
+                            durationMinutes: number | null;
+                            price: number | null;
+                            distanceKm: number | null;
+                        }[];
+                    };
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
     listBotServices: {
         parameters: {
             query: {
@@ -3662,6 +4475,7 @@ export interface operations {
                                 id: string;
                                 /** Format: uuid */
                                 doctorId: string | null;
+                                doctorName: string | null;
                                 methodType: string;
                                 methodTimeMinutes: number | null;
                                 price: number | null;
